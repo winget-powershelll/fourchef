@@ -1,0 +1,50 @@
+FROM fedora:41
+
+RUN dnf -y update && dnf -y install \
+  gcc \
+  gcc-c++ \
+  make \
+  git \
+  curl \
+  wget \
+  which \
+  file \
+  unzip \
+  zip \
+  tar \
+  xz \
+  pkgconf-pkg-config \
+  openssl-devel \
+  webkit2gtk4.1-devel \
+  gtk3-devel \
+  libappindicator-gtk3-devel \
+  libsoup3-devel \
+  javascriptcoregtk4.1-devel \
+  librsvg2-tools \
+  librsvg2-devel \
+  elfutils \
+  binutils \
+  fuse \
+  fuse-libs \
+  appstream \
+  desktop-file-utils \
+  && dnf clean all
+
+# Rust
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:${PATH}
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable && \
+  rustup target add wasm32-unknown-unknown && \
+  cargo install trunk --locked && \
+  cargo install tauri-cli --locked
+
+WORKDIR /workspace
+
+# Avoid no-color incompatibility issues in trunk.
+ENV NO_COLOR=
+ENV TRUNK_WATCH_POLL=true
+ENV NO_STRIP=1
+
+CMD ["bash"]

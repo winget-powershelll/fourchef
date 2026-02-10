@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Some environments export NO_COLOR=1, which trunk rejects.
+unset NO_COLOR || true
+
+exec trunk build --release

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "4chef",
+  "version": "0.1.0",
+  "identifier": "com.fourchef.app",
+  "build": {
+    "beforeDevCommand": "scripts/trunk-dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "scripts/trunk-build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "4chef",
+        "width": 1400,
+        "height": 900
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

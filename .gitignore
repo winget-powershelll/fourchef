@@ -1,0 +1,29 @@
+# ── Rust / Cargo ──
+/target
+
+# ── Tauri ──
+/src-tauri/target
+/src-tauri/gen/schemas
+
+# ── Trunk (WASM build output) ──
+/dist
+
+# ── IDE / Editor ──
+/.idea
+/.vscode
+*.code-workspace
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Logs & temp ──
+*.log
+*.tmp
+*.temp
+
+# ── Local tooling ──
+/tools/linuxdeploy-local
+/tools/squashfs-root
+/tools/aur-linuxdeploy-appimage

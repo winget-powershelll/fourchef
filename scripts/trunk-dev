@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Some environments export NO_COLOR=1, which trunk rejects.
+unset NO_COLOR || true
+export TRUNK_WATCH_POLL=true
+
+exec trunk serve --address 127.0.0.1 --port 1420
