@@ -133,8 +133,6 @@ struct BrowseTableResponse {
 
 #[derive(Serialize)]
 struct UpdateItemArgs {
-    #[serde(rename = "adminCode")]
-    admin_code: String,
     #[serde(rename = "itemId")]
     item_id: i64,
     name: String,
@@ -143,8 +141,6 @@ struct UpdateItemArgs {
 
 #[derive(Serialize)]
 struct UpdateRecipeArgs {
-    #[serde(rename = "adminCode")]
-    admin_code: String,
     #[serde(rename = "recipeId")]
     recipe_id: i64,
     name: String,
@@ -153,8 +149,6 @@ struct UpdateRecipeArgs {
 
 #[derive(Serialize)]
 struct AddRecpItemArgs {
-    #[serde(rename = "adminCode")]
-    admin_code: String,
     #[serde(rename = "recipeId")]
     recipe_id: i64,
     #[serde(rename = "recpItemId")]
@@ -597,6 +591,50 @@ struct InvoiceDetailArgs {
 struct PingResponse {
     ok: bool,
     message: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct ItemSimple {
+    item_id: i64,
+    name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct ItemSimpleResponse {
+    items: Vec<ItemSimple>,
+}
+
+#[derive(Serialize, Clone)]
+struct FoodCostLineInput {
+    #[serde(rename = "itemId")]
+    item_id: i64,
+    #[serde(rename = "unitId")]
+    unit_id: Option<i64>,
+    qty: f64,
+}
+
+#[derive(Serialize)]
+struct CalculateFoodCostArgs {
+    lines: Vec<FoodCostLineInput>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct FoodCostLineOutput {
+    item_id: i64,
+    item_name: String,
+    unit_id: Option<i64>,
+    unit_name: String,
+    qty: f64,
+    price: Option<f64>,
+    extended_cost: Option<f64>,
+    cost_status: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct FoodCostResponse {
+    lines: Vec<FoodCostLineOutput>,
+    total_cost: f64,
+    missing_costs: i64,
 }
 
 async fn invoke_cmd<T: for<'de> Deserialize<'de>>(cmd: &str, args: JsValue) -> Result<T, String> {
@@ -1620,6 +1658,96 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    // ── Food Cost state ──
+    let (fc_item_options, set_fc_item_options) = signal(Vec::<ItemSimple>::new());
+    let (fc_unit_options, set_fc_unit_options) = signal(Vec::<UnitSimple>::new());
+    let (fc_lines, set_fc_lines) = signal(Vec::<FoodCostLineInput>::new());
+    let (fc_result, set_fc_result) = signal(Option::<FoodCostResponse>::None);
+    let (fc_target_pct, set_fc_target_pct) = signal(30.0f64);
+    let (fc_status, set_fc_status) = signal(String::new());
+    let (fc_loading, set_fc_loading) = signal(false);
+    let (fc_add_item_id, set_fc_add_item_id) = signal(String::new());
+    let (fc_add_unit_id, set_fc_add_unit_id) = signal(String::new());
+    let (fc_add_qty, set_fc_add_qty) = signal(String::new());
+    let (fc_dish_name, set_fc_dish_name) = signal(String::new());
+
+    let show_foodcost = move || {
+        set_active_panel.set("foodcost".to_string());
+        if fc_item_options.get().is_empty() {
+            spawn_local(async move {
+                let args = to_value(&PingArgs {}).unwrap();
+                if let Ok(result) = invoke_cmd::<ItemSimpleResponse>("list_items_simple", args).await {
+                    set_fc_item_options.set(result.items);
+                }
+            });
+        }
+        if fc_unit_options.get().is_empty() {
+            trigger_unit_options_fetch(set_fc_unit_options);
+        }
+    };
+
+    let fc_add_line = move || {
+        let item_id = match fc_add_item_id.get().trim().parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                set_fc_status.set("Select an ingredient".to_string());
+                return;
+            }
+        };
+        let unit_id: Option<i64> = fc_add_unit_id.get().trim().parse().ok();
+        let qty: f64 = fc_add_qty.get().trim().parse().unwrap_or(0.0);
+        if qty <= 0.0 {
+            set_fc_status.set("Enter a quantity > 0".to_string());
+            return;
+        }
+        let mut current = fc_lines.get();
+        current.push(FoodCostLineInput { item_id, unit_id, qty });
+        set_fc_lines.set(current);
+        set_fc_add_item_id.set(String::new());
+        set_fc_add_unit_id.set(String::new());
+        set_fc_add_qty.set(String::new());
+        set_fc_status.set(String::new());
+    };
+
+    let fc_remove_line = move |idx: usize| {
+        let mut current = fc_lines.get();
+        if idx < current.len() {
+            current.remove(idx);
+            set_fc_lines.set(current);
+            set_fc_result.set(None);
+        }
+    };
+
+    let fc_calculate = move || {
+        let lines = fc_lines.get();
+        if lines.is_empty() {
+            set_fc_status.set("Add at least one ingredient".to_string());
+            return;
+        }
+        set_fc_loading.set(true);
+        set_fc_status.set("Calculating...".to_string());
+        spawn_local(async move {
+            let args = to_value(&CalculateFoodCostArgs { lines }).unwrap();
+            match invoke_cmd::<FoodCostResponse>("calculate_food_cost", args).await {
+                Ok(result) => {
+                    set_fc_result.set(Some(result));
+                    set_fc_status.set("Done".to_string());
+                }
+                Err(err) => {
+                    set_fc_status.set(format!("Calculation failed: {err}"));
+                }
+            }
+            set_fc_loading.set(false);
+        });
+    };
+
+    let fc_clear = move || {
+        set_fc_lines.set(Vec::new());
+        set_fc_result.set(None);
+        set_fc_status.set(String::new());
+        set_fc_dish_name.set(String::new());
+    };
+
     let export_invoices = move || {
         let query = invoice_query.get();
         let vendor_id = invoice_vendor_filter.get().trim().parse::<i64>().ok();
@@ -1863,7 +1991,6 @@ pub fn App() -> impl IntoView {
         set_edit_item_msg.set("Saving...".to_string());
         spawn_local(async move {
             let args = to_value(&UpdateItemArgs {
-                admin_code: "3137".to_string(),
                 item_id,
                 name,
                 status: status_val,
@@ -1909,7 +2036,6 @@ pub fn App() -> impl IntoView {
         set_edit_recipe_msg.set("Saving...".to_string());
         spawn_local(async move {
             let args = to_value(&UpdateRecipeArgs {
-                admin_code: "3137".to_string(),
                 recipe_id,
                 name,
                 instructions,
@@ -1950,7 +2076,6 @@ pub fn App() -> impl IntoView {
         set_edit_recipe_msg.set("Removing ingredient...".to_string());
         spawn_local(async move {
             let args = to_value(&AddRecpItemArgs {
-                admin_code: "3137".to_string(),
                 recipe_id,
                 recp_item_id: Some(recp_item_id),
                 item_id: 0,
@@ -2138,6 +2263,14 @@ pub fn App() -> impl IntoView {
                     >
                         "Reports"
                     </button>
+                    <button
+                        class="nav-item"
+                        class:active=move || active_panel.get() == "foodcost"
+                        on:click=move |_| show_foodcost()
+                        type="button"
+                    >
+                        "Food Cost"
+                    </button>
                 </div>
             </aside>
             <main class="main">
@@ -2158,6 +2291,7 @@ pub fn App() -> impl IntoView {
                                     "conversions" => "Conversion Lab".to_string(),
                                     "reports" => "Data Health".to_string(),
                                     "purchasing" => "Purchasing".to_string(),
+                                    "foodcost" => "Food Cost Calculator".to_string(),
                                     _ => "4chef".to_string(),
                                 }
                             }}
@@ -2173,6 +2307,7 @@ pub fn App() -> impl IntoView {
                                     "conversions" => "Review conversion gaps and suggested fixes.".to_string(),
                                     "reports" => "Track missing data that blocks accurate costing.".to_string(),
                                     "purchasing" => "Browse invoices and transaction lines.".to_string(),
+                                    "foodcost" => "Build a dish, set your target %, and find the right menu price.".to_string(),
                                     _ => "Organize. Optimize. Itemize. Done."
                                         .to_string(),
                                 }
@@ -4478,6 +4613,210 @@ pub fn App() -> impl IntoView {
                             />
                         </div>
                         <div class="status">{move || report_status.get()}</div>
+                    </div>
+                </Show>
+
+                // ── Food Cost Panel ──
+                <Show when=move || active_panel.get() == "foodcost">
+                    <div class="panel">
+                        <div class="row" style="align-items: center; gap: 12px; margin-bottom: 12px;">
+                            <div class="input" style="flex: 1;">
+                                <label>"Dish name (optional)"</label>
+                                <input
+                                    type="text"
+                                    placeholder="e.g. Grilled Salmon Plate"
+                                    prop:value=fc_dish_name
+                                    on:input=move |ev| set_fc_dish_name.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="input" style="max-width: 160px;">
+                                <label>"Target food cost %"</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="100"
+                                    step="0.5"
+                                    prop:value=move || format!("{}", fc_target_pct.get())
+                                    on:input=move |ev| {
+                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                            set_fc_target_pct.set(v);
+                                        }
+                                    }
+                                />
+                            </div>
+                        </div>
+
+                        <div class="fc-add-row">
+                            <div class="input" style="flex: 2;">
+                                <label>"Ingredient"</label>
+                                <select
+                                    prop:value=fc_add_item_id
+                                    on:change=move |ev| set_fc_add_item_id.set(event_target_value(&ev))
+                                >
+                                    <option value="">"-- Select item --"</option>
+                                    <For
+                                        each=move || fc_item_options.get()
+                                        key=|item| item.item_id
+                                        children=move |item| {
+                                            let val = item.item_id.to_string();
+                                            view! { <option value={val.clone()}>{format!("{} ({})", item.name, item.item_id)}</option> }
+                                        }
+                                    />
+                                </select>
+                            </div>
+                            <div class="input" style="flex: 1;">
+                                <label>"Unit"</label>
+                                <select
+                                    prop:value=fc_add_unit_id
+                                    on:change=move |ev| set_fc_add_unit_id.set(event_target_value(&ev))
+                                >
+                                    <option value="">"-- Unit --"</option>
+                                    <For
+                                        each=move || fc_unit_options.get()
+                                        key=|u| u.unit_id
+                                        children=move |u| {
+                                            let val = u.unit_id.to_string();
+                                            view! { <option value={val.clone()}>{u.sing.clone()}</option> }
+                                        }
+                                    />
+                                </select>
+                            </div>
+                            <div class="input" style="max-width: 100px;">
+                                <label>"Qty"</label>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    placeholder="0.00"
+                                    prop:value=fc_add_qty
+                                    on:input=move |ev| set_fc_add_qty.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div class="input">
+                                <label style="visibility: hidden;">{"\u{00A0}"}</label>
+                                <button class="button secondary" on:click=move |_| fc_add_line()>
+                                    "+ Add"
+                                </button>
+                            </div>
+                        </div>
+
+                        // ingredient lines table
+                        <Show when=move || !fc_lines.get().is_empty()>
+                            <div class="data-table" style="margin-top: 12px;">
+                                <div class="data-header data-cols-4">
+                                    <span>"Ingredient"</span>
+                                    <span>"Unit"</span>
+                                    <span>"Qty"</span>
+                                    <span></span>
+                                </div>
+                                <For
+                                    each=move || {
+                                        fc_lines.get().iter().enumerate().map(|(i, l)| (i, l.clone())).collect::<Vec<_>>()
+                                    }
+                                    key=|(i, _)| *i
+                                    children=move |(idx, line)| {
+                                        let item_name = fc_item_options.get().iter()
+                                            .find(|it| it.item_id == line.item_id)
+                                            .map(|it| it.name.clone())
+                                            .unwrap_or_else(|| format!("Item {}", line.item_id));
+                                        let unit_name = line.unit_id
+                                            .and_then(|uid| fc_unit_options.get().iter().find(|u| u.unit_id == uid).map(|u| u.sing.clone()))
+                                            .unwrap_or_else(|| "-".to_string());
+                                        view! {
+                                            <div class="data-row data-cols-4">
+                                                <span>{item_name}</span>
+                                                <span>{unit_name}</span>
+                                                <span>{format!("{:.2}", line.qty)}</span>
+                                                <span>
+                                                    <button class="button-link danger" on:click=move |_| fc_remove_line(idx)>
+                                                        "\u{2715}"
+                                                    </button>
+                                                </span>
+                                            </div>
+                                        }
+                                    }
+                                />
+                            </div>
+
+                            <div class="row" style="margin-top: 12px; gap: 8px;">
+                                <button class="button" on:click=move |_| fc_calculate() disabled=move || fc_loading.get()>
+                                    {move || if fc_loading.get() { "Calculating\u{2026}" } else { "Calculate Cost" }}
+                                </button>
+                                <button class="button secondary" on:click=move |_| fc_clear()>
+                                    "Clear All"
+                                </button>
+                            </div>
+                        </Show>
+
+                        <div class="status">{move || fc_status.get()}</div>
+
+                        // results
+                        <Show when=move || fc_result.get().is_some()>
+                            {move || {
+                                let result = fc_result.get().unwrap_or_default();
+                                let total = result.total_cost;
+                                let missing = result.missing_costs;
+                                let pct = fc_target_pct.get();
+                                let menu_price = if pct > 0.0 { total / (pct / 100.0) } else { 0.0 };
+                                let dish = fc_dish_name.get();
+                                let dish_label = if dish.trim().is_empty() { "This dish".to_string() } else { dish };
+
+                                view! {
+                                    <div class="fc-results">
+                                        <div class="fc-summary-cards">
+                                            <div class="card fc-card">
+                                                <h4>"Total Ingredient Cost"</h4>
+                                                <p class="fc-big-number">{format_money(total)}</p>
+                                            </div>
+                                            <div class="card fc-card fc-card-highlight">
+                                                <h4>"Suggested Menu Price"</h4>
+                                                <p class="fc-big-number">{format_money(menu_price)}</p>
+                                                <p class="fc-sub">{format!("at {}% food cost", pct)}</p>
+                                            </div>
+                                            <div class="card fc-card">
+                                                <h4>"Profit per Plate"</h4>
+                                                <p class="fc-big-number">{format_money(menu_price - total)}</p>
+                                            </div>
+                                        </div>
+
+                                        <Show when=move || { missing > 0 }>
+                                            <div class="fc-warning">
+                                                {format!("\u{26A0} {} ingredient(s) could not be costed. The total may be understated.", missing)}
+                                            </div>
+                                        </Show>
+
+                                        <div class="fc-detail-label">
+                                            {format!("\u{1F4CB} {} \u{2014} ingredient breakdown", dish_label)}
+                                        </div>
+                                        <div class="data-table">
+                                            <div class="data-header data-cols-5">
+                                                <span>"Ingredient"</span>
+                                                <span>"Qty"</span>
+                                                <span>"Unit Price"</span>
+                                                <span>"Line Cost"</span>
+                                                <span>"Status"</span>
+                                            </div>
+                                            <For
+                                                each=move || result.lines.clone()
+                                                key=|line| line.item_id
+                                                children=move |line| {
+                                                    let status_class = if line.cost_status == "OK" { "fc-status-ok" } else { "fc-status-warn" };
+                                                    view! {
+                                                        <div class="data-row data-cols-5">
+                                                            <span>{format!("{} ({})", line.item_name, line.unit_name)}</span>
+                                                            <span>{format!("{:.2}", line.qty)}</span>
+                                                            <span>{line.price.map(|p| format_money(p)).unwrap_or_else(|| "\u{2014}".to_string())}</span>
+                                                            <span>{line.extended_cost.map(|c| format_money(c)).unwrap_or_else(|| "\u{2014}".to_string())}</span>
+                                                            <span class={status_class}>{line.cost_status.clone()}</span>
+                                                        </div>
+                                                    }
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+                                }
+                            }}
+                        </Show>
                     </div>
                 </Show>
             </main>

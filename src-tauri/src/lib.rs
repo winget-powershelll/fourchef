@@ -433,15 +433,6 @@ fn expand_base_path(input: &str) -> String {
     path_str
 }
 
-fn require_admin_code(admin_code: &str) -> Result<(), String> {
-    let expected = env::var("FOURCHEF_ADMIN_CODE").unwrap_or_else(|_| "3137".to_string());
-    if admin_code == expected {
-        Ok(())
-    } else {
-        Err("Admin code invalid".to_string())
-    }
-}
-
 fn table_count(conn: &rusqlite::Connection, table: &str) -> usize {
     conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
         row.get::<_, i64>(0)
@@ -1595,12 +1586,10 @@ fn list_items_simple(app: tauri::AppHandle) -> Result<ItemSimpleResponse, String
 #[tauri::command]
 fn set_item_purch_unit(
     app: tauri::AppHandle,
-    admin_code: String,
     item_id: i64,
     purch_unit_id: i64,
     is_default: bool,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
     let item_exists: i64 = conn
         .query_row(
@@ -1670,12 +1659,10 @@ fn set_item_purch_unit(
 #[tauri::command]
 fn update_item(
     app: tauri::AppHandle,
-    admin_code: String,
     item_id: i64,
     name: String,
     status: Option<i64>,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
     let final_name = if name.trim().is_empty() {
         "-".to_string()
@@ -1700,11 +1687,9 @@ fn update_item(
 #[tauri::command]
 fn update_vendor(
     app: tauri::AppHandle,
-    admin_code: String,
     vendor_id: i64,
     name: String,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
     let final_name = if name.trim().is_empty() {
         "-".to_string()
@@ -1733,12 +1718,10 @@ fn update_vendor(
 #[tauri::command]
 fn update_recipe(
     app: tauri::AppHandle,
-    admin_code: String,
     recipe_id: i64,
     name: String,
     instructions: String,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
     let final_name = if name.trim().is_empty() {
         "-".to_string()
@@ -1769,14 +1752,12 @@ fn update_recipe(
 #[tauri::command]
 fn add_recp_item(
     app: tauri::AppHandle,
-    admin_code: String,
     recipe_id: i64,
     recp_item_id: Option<i64>,
     item_id: i64,
     unit_id: Option<i64>,
     qty: Option<f64>,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
 
     if let Some(recp_item_id) = recp_item_id {
@@ -1838,7 +1819,6 @@ fn add_recp_item(
 #[tauri::command]
 fn upsert_convunit(
     app: tauri::AppHandle,
-    admin_code: String,
     item_id: i64,
     vendor_id: i64,
     unit_id1: i64,
@@ -1847,7 +1827,6 @@ fn upsert_convunit(
     qty2: f64,
     status: Option<i64>,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     if qty1 <= 0.0 || qty2 <= 0.0 {
         return Err("Quantity must be greater than 0".to_string());
     }
@@ -1880,7 +1859,6 @@ fn upsert_convunit(
 #[tauri::command]
 fn update_invoice(
     app: tauri::AppHandle,
-    admin_code: String,
     invoice_id: i64,
     invoice_no: String,
     invoice_date: String,
@@ -1889,7 +1867,6 @@ fn update_invoice(
     total: Option<f64>,
     status: Option<i64>,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
 
     let updated = conn
@@ -1922,7 +1899,6 @@ fn update_invoice(
 #[tauri::command]
 fn update_trans_line(
     app: tauri::AppHandle,
-    admin_code: String,
     trans_id: i64,
     qty: Option<f64>,
     unit_id: Option<i64>,
@@ -1930,7 +1906,6 @@ fn update_trans_line(
     ext_cost: Option<f64>,
     status: Option<i64>,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let conn = open_initialized_db(&app)?;
 
     let updated = conn
@@ -1957,8 +1932,7 @@ fn update_trans_line(
 }
 
 #[tauri::command]
-fn recalculate_reports(app: tauri::AppHandle, admin_code: String) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
+fn recalculate_reports(app: tauri::AppHandle) -> Result<PatchResponse, String> {
     let conn = open_initialized_db(&app)?;
 
     conn.execute(
@@ -1994,8 +1968,7 @@ fn recalculate_reports(app: tauri::AppHandle, admin_code: String) -> Result<Patc
 }
 
 #[tauri::command]
-fn revert_db(app: tauri::AppHandle, admin_code: String) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
+fn revert_db(app: tauri::AppHandle) -> Result<PatchResponse, String> {
     let path = db_path(&app)?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2023,13 +1996,11 @@ fn revert_db(app: tauri::AppHandle, admin_code: String) -> Result<PatchResponse,
 #[tauri::command]
 fn upsert_manual_price(
     app: tauri::AppHandle,
-    admin_code: String,
     item_id: i64,
     vendor_id: i64,
     price: f64,
     pack: String,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     if price <= 0.0 {
         return Err("Price must be greater than 0".to_string());
     }
@@ -2091,11 +2062,9 @@ fn upsert_manual_price(
 #[tauri::command]
 fn merge_vendor(
     app: tauri::AppHandle,
-    admin_code: String,
     source_vendor_id: i64,
     target_vendor_id: i64,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     if source_vendor_id == target_vendor_id {
         return Err("Source and target vendor IDs must be different".to_string());
     }
@@ -3236,7 +3205,6 @@ fn export_invoice_lines_csv(
 #[tauri::command]
 fn patch_convunit(
     app: tauri::AppHandle,
-    admin_code: String,
     base_path: String,
     item_id: i64,
     vendor_id: i64,
@@ -3245,7 +3213,6 @@ fn patch_convunit(
     qty1: f64,
     qty2: f64,
 ) -> Result<PatchResponse, String> {
-    require_admin_code(&admin_code)?;
     let base = resolve_base_path(&base_path)?;
     if !base.exists() {
         return Err(format!("Base path does not exist: {}", base.display()));
@@ -3977,6 +3944,147 @@ fn import_pdf_invoice(
     })
 }
 
+// ── Food cost calculator ──
+
+#[derive(serde::Deserialize)]
+struct FoodCostLineInput {
+    item_id: i64,
+    unit_id: Option<i64>,
+    qty: f64,
+}
+
+#[derive(Serialize)]
+struct FoodCostLineOutput {
+    item_id: i64,
+    item_name: String,
+    unit_id: Option<i64>,
+    unit_name: String,
+    qty: f64,
+    price: Option<f64>,
+    extended_cost: Option<f64>,
+    cost_status: String,
+}
+
+#[derive(Serialize)]
+struct FoodCostResponse {
+    lines: Vec<FoodCostLineOutput>,
+    total_cost: f64,
+    missing_costs: i64,
+}
+
+#[tauri::command]
+fn calculate_food_cost(
+    app: tauri::AppHandle,
+    lines: Vec<FoodCostLineInput>,
+) -> Result<FoodCostResponse, String> {
+    let conn = open_initialized_db(&app)?;
+
+    let mut out_lines = Vec::new();
+    let mut total_cost = 0.0f64;
+    let mut missing_costs = 0i64;
+
+    for line in &lines {
+        let item_name: String = conn
+            .query_row(
+                "SELECT name FROM items WHERE item_id = ?1",
+                [line.item_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "(unknown)".to_string());
+
+        let unit_name: String = if let Some(uid) = line.unit_id {
+            conn.query_row("SELECT sing FROM units WHERE unit_id = ?1", [uid], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|_| "-".to_string())
+        } else {
+            "-".to_string()
+        };
+
+        let purch_unit_id: Option<i64> = conn
+            .query_row(
+                "SELECT purch_unit_id FROM inv_units WHERE item_id = ?1 AND is_default = 1 LIMIT 1",
+                [line.item_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT purch_unit_id FROM inv_units WHERE item_id = ?1 LIMIT 1",
+                    [line.item_id],
+                    |row| row.get(0),
+                )
+                .ok()
+            });
+
+        let price_vendor: Option<(f64, i64)> = conn
+            .query_row(
+                "SELECT price, vendor_id FROM inv_prices WHERE item_id = ?1 ORDER BY vendor_id LIMIT 1",
+                [line.item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok()
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT price, vendor_id FROM trans WHERE item_id = ?1 AND price IS NOT NULL AND price > 0 ORDER BY trans_date DESC, trans_id DESC LIMIT 1",
+                    [line.item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok()
+            });
+        let price = price_vendor.map(|v| v.0);
+        let price_vendor_id = price_vendor.map(|v| v.1);
+
+        let mut factor: Option<f64> = None;
+        if let (Some(recipe_unit_id), Some(pu_id)) = (line.unit_id, purch_unit_id) {
+            if recipe_unit_id == pu_id {
+                factor = Some(1.0);
+            } else {
+                let edges = build_conversion_edges(&conn, line.item_id, price_vendor_id)?;
+                if let Some((f, _)) = bfs_conversion_factor(&edges, recipe_unit_id, pu_id, 6) {
+                    factor = Some(f);
+                }
+            }
+        }
+
+        let (cost_status, extended_cost) = if line.qty <= 0.0 {
+            ("Missing qty".to_string(), None)
+        } else if purch_unit_id.is_none() {
+            ("Missing purch unit".to_string(), None)
+        } else if price.is_none() {
+            ("Missing price".to_string(), None)
+        } else if factor.is_none() {
+            ("Needs conversion".to_string(), None)
+        } else {
+            let cost = line.qty * factor.unwrap_or(1.0) * price.unwrap_or(0.0);
+            ("OK".to_string(), Some(cost))
+        };
+
+        if let Some(c) = extended_cost {
+            total_cost += c;
+        } else {
+            missing_costs += 1;
+        }
+
+        out_lines.push(FoodCostLineOutput {
+            item_id: line.item_id,
+            item_name,
+            unit_id: line.unit_id,
+            unit_name,
+            qty: line.qty,
+            price,
+            extended_cost,
+            cost_status,
+        });
+    }
+
+    Ok(FoodCostResponse {
+        lines: out_lines,
+        total_cost,
+        missing_costs,
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -4027,7 +4135,8 @@ pub fn run() {
             export_recipe_pdf,
             export_recipe_docx,
             preview_pdf_invoice,
-            import_pdf_invoice
+            import_pdf_invoice,
+            calculate_food_cost
         ])
         .setup(|app| {
             let path = db_path(&app.handle())?;

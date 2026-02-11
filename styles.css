@@ -601,3 +601,96 @@ select {
 .button.danger:hover {
   background: #b71c1c;
 }
+
+/* ── Food Cost panel ── */
+
+.fc-add-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.fc-results {
+  margin-top: 18px;
+}
+
+.fc-summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.fc-card {
+  text-align: center;
+  padding: 20px 16px;
+}
+
+.fc-card-highlight {
+  background: rgba(31, 122, 85, 0.08);
+  border-color: rgba(31, 122, 85, 0.3);
+}
+
+.fc-big-number {
+  font-family: "Fraunces", serif;
+  font-size: 32px !important;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--accent);
+}
+
+.fc-card-highlight .fc-big-number {
+  color: var(--accent);
+}
+
+.fc-sub {
+  font-size: 13px !important;
+  color: var(--ink-soft);
+  margin-top: 4px !important;
+  font-weight: 400;
+}
+
+.fc-warning {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: #856404;
+  margin-bottom: 14px;
+}
+
+.fc-detail-label {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+}
+
+.fc-status-ok {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.fc-status-warn {
+  color: var(--accent-2);
+  font-weight: 600;
+}
+
+.button-link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.button-link.danger {
+  color: #d32f2f;
+}
+
+.button-link.danger:hover {
+  background: rgba(211, 47, 47, 0.1);
+}
