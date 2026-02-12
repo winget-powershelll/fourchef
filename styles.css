@@ -543,6 +543,39 @@ select {
   grid-template-columns: 1.2fr 1.2fr 0.7fr 0.6fr 0.6fr 1fr 0.7fr;
 }
 
+.data-cols-8 {
+  grid-template-columns: 0.6fr 1.4fr 1.2fr 0.5fr 0.7fr 0.7fr 0.5fr 1fr;
+}
+
+.inline-input {
+  width: 70px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  text-align: right;
+  background: #fff;
+}
+
+.inline-input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(45, 106, 79, 0.15);
+}
+
+.inline-status {
+  font-size: 11px;
+  color: var(--ink-soft);
+  margin-left: 4px;
+}
+
+.action-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .recipe-grid {
   display: grid;
   grid-template-columns: 320px 1fr;

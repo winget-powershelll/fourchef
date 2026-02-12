@@ -87,6 +87,23 @@ struct PatchConvunitArgs {
 }
 
 #[derive(Serialize)]
+struct UpsertConvunitArgs {
+    #[serde(rename = "itemId")]
+    item_id: i64,
+    #[serde(rename = "vendorId")]
+    vendor_id: i64,
+    #[serde(rename = "unitId1")]
+    unit_id1: i64,
+    #[serde(rename = "unitId2")]
+    unit_id2: i64,
+    #[serde(rename = "qty1")]
+    qty1: f64,
+    #[serde(rename = "qty2")]
+    qty2: f64,
+    status: Option<i64>,
+}
+
+#[derive(Serialize)]
 struct SetPurchUnitArgs {
     #[serde(rename = "itemId")]
     item_id: i64,
@@ -2811,7 +2828,7 @@ pub fn App() -> impl IntoView {
                                 class:card-active=move || browse_table_name.get() == "missing_edges"
                                 on:click=move |_| toggle_card("missing_edges")
                             >
-                                <h4>"Missing Edges"</h4>
+                                <h4>"Local Conversions"</h4>
                                 <p>{move || summary.get().missing_edges.to_string()}</p>
                             </div>
                             <div
@@ -3604,7 +3621,7 @@ pub fn App() -> impl IntoView {
                                                     </div>
                                                 </div>
                                                 <div class="detail-block">
-                                                    <strong>"Missing Conversions"</strong>
+                                                    <strong>"Local Conversions"</strong>
                                                     <div class="data-table">
                                                         <div class="data-header data-cols-4">
                                                             <span>"Vendor"</span>
@@ -4251,7 +4268,7 @@ pub fn App() -> impl IntoView {
                                 <strong>"Conversion Overview"</strong>
                                 <div class="status">
                                     {move || format!(
-                                        "Suggestions: {} | Safe: {} | Todo: {} | Missing edges: {}",
+                                        "Suggestions: {} | Safe: {} | Todo: {} | Local conversions: {}",
                                         conversion_overview.get().suggestions,
                                         conversion_overview.get().suggestions_safe,
                                         conversion_overview.get().todo,
@@ -4333,7 +4350,7 @@ pub fn App() -> impl IntoView {
                                     );
                                 }
                             >
-                                "Missing Edges"
+                                "Local Conversions"
                             </button>
                         </div>
                         <div class="status">{move || conversion_status.get()}</div>
@@ -4429,26 +4446,84 @@ pub fn App() -> impl IntoView {
                         </Show>
                         <Show when=move || conversion_tab.get() == "missing">
                             <div class="data-table">
-                                <div class="data-header data-cols-6">
+                                <div class="data-header data-cols-8">
                                     <span>"Item"</span>
                                     <span>"Item Name"</span>
                                     <span>"Units"</span>
                                     <span>"Hits"</span>
+                                    <span>"Qty (recipe)"</span>
+                                    <span>"Qty (purch)"</span>
                                     <span>"Vendor"</span>
-                                    <span>"Purch Unit"</span>
+                                    <span>"Action"</span>
                                 </div>
                                 <For
                                     each=move || conversion_missing_edges.get()
                                     key=|row| (row.item_id, row.recipe_unit_id, row.purch_unit_id)
-                                    children=move |row| view! {
-                                        <div class="data-row data-cols-6">
-                                            <span>{row.item_id}</span>
-                                            <span>{row.item_name}</span>
-                                            <span>{format!("{} → {}", row.recipe_unit, row.purch_unit)}</span>
-                                            <span>{row.hits.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
-                                            <span>{row.vendor_id}</span>
-                                            <span>{row.purch_unit}</span>
-                                        </div>
+                                    children=move |row| {
+                                        let (qty1_val, set_qty1_val) = signal(String::new());
+                                        let (qty2_val, set_qty2_val) = signal(String::new());
+                                        let (save_status, set_save_status) = signal(String::new());
+                                        let row_c = row.clone();
+                                        let save_local_conv = move |_| {
+                                            let q1: f64 = match qty1_val.get().parse() {
+                                                Ok(v) if v > 0.0 => v,
+                                                _ => { set_save_status.set("Invalid qty".into()); return; }
+                                            };
+                                            let q2: f64 = match qty2_val.get().parse() {
+                                                Ok(v) if v > 0.0 => v,
+                                                _ => { set_save_status.set("Invalid qty".into()); return; }
+                                            };
+                                            let r = row_c.clone();
+                                            set_save_status.set("Saving...".into());
+                                            spawn_local(async move {
+                                                let args = to_value(&UpsertConvunitArgs {
+                                                    item_id: r.item_id,
+                                                    vendor_id: r.vendor_id,
+                                                    unit_id1: r.recipe_unit_id,
+                                                    unit_id2: r.purch_unit_id,
+                                                    qty1: q1,
+                                                    qty2: q2,
+                                                    status: Some(1),
+                                                }).unwrap();
+                                                match invoke_cmd::<PatchResponse>("upsert_convunit", args).await {
+                                                    Ok(resp) => set_save_status.set(resp.message),
+                                                    Err(e) => set_save_status.set(format!("Error: {e}")),
+                                                }
+                                            });
+                                        };
+                                        view! {
+                                            <div class="data-row data-cols-8">
+                                                <span>{row.item_id}</span>
+                                                <span>{row.item_name}</span>
+                                                <span>{format!("{} → {}", row.recipe_unit, row.purch_unit)}</span>
+                                                <span>{row.hits.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
+                                                <input
+                                                    class="inline-input"
+                                                    type="number"
+                                                    step="any"
+                                                    min="0"
+                                                    placeholder="qty"
+                                                    prop:value=move || qty1_val.get()
+                                                    on:input=move |ev| set_qty1_val.set(event_target_value(&ev))
+                                                />
+                                                <input
+                                                    class="inline-input"
+                                                    type="number"
+                                                    step="any"
+                                                    min="0"
+                                                    placeholder="qty"
+                                                    prop:value=move || qty2_val.get()
+                                                    on:input=move |ev| set_qty2_val.set(event_target_value(&ev))
+                                                />
+                                                <span>{row.vendor_id}</span>
+                                                <span class="action-cell">
+                                                    <button class="button tiny" on:click=save_local_conv>"Save"</button>
+                                                    <Show when=move || !save_status.get().is_empty()>
+                                                        <span class="inline-status">{move || save_status.get()}</span>
+                                                    </Show>
+                                                </span>
+                                            </div>
+                                        }
                                     }
                                 />
                             </div>
