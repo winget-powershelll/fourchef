@@ -286,6 +286,30 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
             }
         },
     )
+    .and_then(
+        |_| match conn.execute("ALTER TABLE inv_prices ADD COLUMN prev_price REAL", []) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("duplicate column name") {
+                    Ok(())
+                } else {
+                    Err(msg)
+                }
+            }
+        },
+    )
+    .and_then(|_| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            );
+            "#,
+        )
+        .map_err(|e| e.to_string())
+    })
 }
 
 pub fn clear_tables(conn: &Connection) -> Result<(), String> {

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::collections::HashMap;
+use tauri::Manager;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::Command;
@@ -52,6 +53,8 @@ struct InventoryDetailPrice {
     vendor_id: Option<i64>,
     vendor_name: String,
     price: Option<f64>,
+    prev_price: Option<f64>,
+    diff_pct: Option<f64>,
     pack: String,
     status: Option<i64>,
 }
@@ -195,6 +198,7 @@ struct RecipeDetailResponse {
     missing_costs: i64,
     instructions: String,
     ingredients: Vec<RecipeIngredient>,
+    allergens: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1194,7 +1198,7 @@ fn get_inventory_detail(
     let mut prices = Vec::new();
     let mut stmt = conn
         .prepare(
-            "SELECT ip.vendor_id, v.name, ip.price, ip.pack, ip.status
+            "SELECT ip.vendor_id, v.name, ip.price, ip.pack, ip.status, ip.prev_price
              FROM inv_prices ip
              LEFT JOIN vendors v ON v.vendor_id = ip.vendor_id
              WHERE ip.item_id = ?1
@@ -1203,10 +1207,18 @@ fn get_inventory_detail(
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([item_id], |row| {
+            let price: Option<f64> = row.get(2).ok();
+            let prev_price: Option<f64> = row.get(5).ok().flatten();
+            let diff_pct = match (price, prev_price) {
+                (Some(p), Some(pp)) if pp > 0.0 => Some(((p - pp) / pp) * 100.0),
+                _ => None,
+            };
             Ok(InventoryDetailPrice {
                 vendor_id: row.get(0).ok(),
                 vendor_name: row.get(1).unwrap_or_else(|_| "-".to_string()),
-                price: row.get(2).ok(),
+                price,
+                prev_price,
+                diff_pct,
                 pack: row.get(3).unwrap_or_else(|_| "-".to_string()),
                 status: row.get(4).ok(),
             })
@@ -2036,15 +2048,15 @@ fn upsert_manual_price(
     let updated = conn
         .execute(
             "UPDATE inv_prices
-             SET price = ?3, pack = ?4, status = ?5
+             SET prev_price = price, price = ?3, pack = ?4, status = ?5
              WHERE item_id = ?1 AND vendor_id = ?2",
             (item_id, vendor_id, price, &pack, Some(1i64)),
         )
         .map_err(|e| e.to_string())?;
     if updated == 0 {
         conn.execute(
-            "INSERT INTO inv_prices (item_id, vendor_id, price, pack, status)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO inv_prices (item_id, vendor_id, price, pack, status, prev_price)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
             (item_id, vendor_id, price, &pack, Some(1i64)),
         )
         .map_err(|e| e.to_string())?;
@@ -2651,6 +2663,8 @@ fn get_recipe_detail(
         });
     }
 
+    let allergens = detect_allergens(&ingredients);
+
     Ok(RecipeDetailResponse {
         recipe_id,
         name,
@@ -2659,7 +2673,72 @@ fn get_recipe_detail(
         missing_costs,
         instructions,
         ingredients,
+        allergens,
     })
+}
+
+fn detect_allergens(ingredients: &[RecipeIngredient]) -> Vec<String> {
+    const ALLERGEN_RULES: &[(&str, &[&str])] = &[
+        ("Eggs", &["egg", "eggs", "meringue", "mayo", "mayonnaise", "aioli", "custard", "hollandaise"]),
+        ("Fish/Shellfish", &["fish", "salmon", "tuna", "cod", "halibut", "trout", "tilapia", "bass",
+            "shrimp", "prawn", "crab", "lobster", "clam", "mussel", "oyster", "scallop",
+            "squid", "calamari", "anchov", "sardine", "swordfish", "mahi", "snapper",
+            "crawfish", "crayfish", "shellfish", "octopus"]),
+        ("Dairy", &["milk", "cream", "butter", "cheese", "yogurt", "yoghurt", "whey",
+            "casein", "curd", "ghee", "ricotta", "mozzarella", "parmesan", "cheddar",
+            "brie", "gouda", "swiss", "provolone", "gruyere", "mascarpone", "sour cream",
+            "half and half", "half & half", "condensed milk", "evaporated milk",
+            "buttermilk", "whipped cream", "ice cream", "custard"]),
+        ("Nuts/Peanuts", &["peanut", "almond", "walnut", "cashew", "pecan", "pistachio",
+            "hazelnut", "macadamia", "brazil nut", "pine nut", "chestnut",
+            "praline", "marzipan", "nougat", "nut butter", "nutella"]),
+        ("Wheat/Gluten", &["wheat", "flour", "bread", "pasta", "noodle", "couscous",
+            "tortilla", "crouton", "breadcrumb", "panko", "pita", "baguette",
+            "semolina", "farina", "spelt", "rye", "barley", "farro",
+            "cracker", "pastry", "croissant", "brioche", "phyllo", "wonton"]),
+        ("Mustard", &["mustard"]),
+        ("Sesame", &["sesame", "tahini"]),
+        ("Soy", &["soy", "soya", "tofu", "tempeh", "edamame", "miso",
+            "soy sauce", "tamari", "teriyaki"]),
+    ];
+
+    let mut found = Vec::new();
+
+    for (label, keywords) in ALLERGEN_RULES {
+        let mut detected = false;
+        'outer: for ingredient in ingredients {
+            let name_lower = ingredient.item_name.to_lowercase();
+            for kw in *keywords {
+                // Check word-boundary-like match to avoid false positives
+                // e.g. "bass" shouldn't match "basil"
+                if keyword_matches(&name_lower, kw) {
+                    detected = true;
+                    break 'outer;
+                }
+            }
+        }
+        if detected {
+            found.push(label.to_string());
+        }
+    }
+
+    found
+}
+
+fn keyword_matches(haystack: &str, keyword: &str) -> bool {
+    // For multi-word keywords, use simple contains
+    if keyword.contains(' ') {
+        return haystack.contains(keyword);
+    }
+    // For single-word keywords, check word boundaries
+    for word in haystack.split(|c: char| !c.is_alphanumeric()) {
+        let w = word.to_lowercase();
+        // Exact match or the word starts with the keyword (handles plurals like "eggs", "almonds")
+        if w == keyword || w.starts_with(keyword) {
+            return true;
+        }
+    }
+    false
 }
 
 #[tauri::command]
@@ -3352,6 +3431,27 @@ fn browse_table(
 use printpdf::*;
 use std::io::BufWriter;
 
+/// Embedded 4chef logo PNG for export headers
+const LOGO_PNG: &[u8] = include_bytes!("../assets/4chef-logo.png");
+
+/// Adds the 4chef logo to a PDF layer at the given (x, y) position.
+/// The logo renders at approximately 20 mm wide.
+fn add_logo_to_pdf_layer(layer: &PdfLayerReference) {
+    let margin_left = 15.0f32;
+    if let Ok(img) = printpdf::image_crate::load_from_memory(LOGO_PNG) {
+        let width_px = img.width() as f32;
+        let target_mm = 20.0f32;
+        let dpi = width_px / (target_mm / 25.4);
+        let pdf_img = Image::from_dynamic_image(&img);
+        pdf_img.add_to_layer(layer.clone(), ImageTransform {
+            translate_x: Some(Mm(margin_left)),
+            translate_y: Some(Mm(274.0)),
+            dpi: Some(dpi),
+            ..Default::default()
+        });
+    }
+}
+
 /// Wraps long text into lines of at most `max_chars` characters, breaking on
 /// whitespace boundaries.
 fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
@@ -3408,11 +3508,14 @@ fn export_inventory_pdf(
     let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| e.to_string())?;
 
     let mut current_layer = doc.get_page(page1).get_layer(layer1);
-    let mut y = 280.0f32;
     let line_height = 5.0f32;
     let margin_left = 15.0f32;
 
-    // Title
+    // Logo
+    add_logo_to_pdf_layer(&current_layer);
+
+    // Title (shifted down to leave room for logo)
+    let mut y = 270.0f32;
     current_layer.use_text("4chef — Inventory Report", 16.0, Mm(margin_left), Mm(y), &font_bold);
     y -= 10.0;
 
@@ -3493,10 +3596,13 @@ fn export_recipe_pdf(
     let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| e.to_string())?;
 
     let mut current_layer = doc.get_page(page1).get_layer(layer1);
-    let mut y = 280.0f32;
     let margin_left = 15.0f32;
 
-    // Title
+    // Logo
+    add_logo_to_pdf_layer(&current_layer);
+
+    // Title (shifted down to leave room for logo)
+    let mut y = 270.0f32;
     current_layer.use_text(&name, 18.0, Mm(margin_left), Mm(y), &font_bold);
     y -= 10.0;
 
@@ -3575,6 +3681,14 @@ fn export_inventory_docx(
 
     let mut docx = Docx::new();
 
+    // Logo (~20 mm ≈ 720 000 EMU)
+    {
+        let pic = Pic::new(LOGO_PNG).size(720_000, 720_000);
+        docx = docx.add_paragraph(
+            Paragraph::new().add_run(Run::new().add_image(pic)),
+        );
+    }
+
     // Title
     docx = docx.add_paragraph(
         Paragraph::new()
@@ -3643,6 +3757,14 @@ fn export_recipe_docx(
 
     let mut docx = Docx::new();
 
+    // Logo (~20 mm ≈ 720 000 EMU)
+    {
+        let pic = Pic::new(LOGO_PNG).size(720_000, 720_000);
+        docx = docx.add_paragraph(
+            Paragraph::new().add_run(Run::new().add_image(pic)),
+        );
+    }
+
     // Title
     docx = docx.add_paragraph(
         Paragraph::new().add_run(Run::new().add_text(&name).bold().size(36)),
@@ -3691,6 +3813,287 @@ fn export_recipe_docx(
         ok: true,
         message: format!("Exported recipe '{}' to {}", name, output_path),
     })
+}
+
+// ──────────────────────────────────────────
+// FDA Guidelines PDF export
+// ──────────────────────────────────────────
+
+#[tauri::command]
+fn export_fda_pdf(output_path: String) -> Result<PatchResponse, String> {
+    let (doc, page1, layer1) =
+        PdfDocument::new("FDA Food Safety Guidelines", Mm(210.0), Mm(297.0), "Layer 1");
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica).map_err(|e| e.to_string())?;
+    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| e.to_string())?;
+
+    let mut current_layer = doc.get_page(page1).get_layer(layer1);
+    let margin_left = 15.0f32;
+    let line_height = 5.0f32;
+
+    // Logo
+    add_logo_to_pdf_layer(&current_layer);
+
+    let mut y = 270.0f32;
+    current_layer.use_text("FDA Food Safety Guidelines", 18.0, Mm(margin_left), Mm(y), &font_bold);
+    y -= 10.0;
+    current_layer.use_text("Quick-reference for commercial kitchen operations", 9.0, Mm(margin_left), Mm(y), &font);
+    y -= 10.0;
+
+    // helper: new page if needed
+    macro_rules! check_page {
+        ($y:expr, $doc:expr, $layer:expr, $need:expr) => {
+            if $y < $need {
+                let (np, nl) = $doc.add_page(Mm(210.0), Mm(297.0), "Layer 1");
+                $layer = $doc.get_page(np).get_layer(nl);
+                $y = 285.0;
+            }
+        };
+    }
+
+    // helper: section heading
+    macro_rules! section {
+        ($y:expr, $layer:expr, $doc:expr, $title:expr, $font_bold:expr) => {
+            check_page!($y, $doc, $layer, 30.0);
+            $layer.use_text($title, 13.0, Mm(margin_left), Mm($y), $font_bold);
+            $y -= 7.0;
+        };
+    }
+
+    // helper: table row
+    macro_rules! row2 {
+        ($y:expr, $layer:expr, $doc:expr, $a:expr, $b:expr, $font:expr) => {
+            check_page!($y, $doc, $layer, 12.0);
+            $layer.use_text($a, 8.0, Mm(margin_left), Mm($y), $font);
+            $layer.use_text($b, 8.0, Mm(margin_left + 80.0), Mm($y), $font);
+            $y -= line_height;
+        };
+    }
+    macro_rules! row3 {
+        ($y:expr, $layer:expr, $doc:expr, $a:expr, $b:expr, $c:expr, $font:expr) => {
+            check_page!($y, $doc, $layer, 12.0);
+            $layer.use_text($a, 8.0, Mm(margin_left), Mm($y), $font);
+            $layer.use_text($b, 8.0, Mm(margin_left + 60.0), Mm($y), $font);
+            $layer.use_text($c, 8.0, Mm(margin_left + 120.0), Mm($y), $font);
+            $y -= line_height;
+        };
+    }
+    macro_rules! bullet {
+        ($y:expr, $layer:expr, $doc:expr, $text:expr, $font:expr) => {
+            check_page!($y, $doc, $layer, 12.0);
+            for line in wrap_text($text, 100) {
+                check_page!($y, $doc, $layer, 12.0);
+                $layer.use_text(&format!("•  {}", line), 8.0, Mm(margin_left), Mm($y), $font);
+                $y -= line_height;
+            }
+        };
+    }
+    macro_rules! note {
+        ($y:expr, $layer:expr, $doc:expr, $text:expr, $font:expr) => {
+            check_page!($y, $doc, $layer, 12.0);
+            for line in wrap_text(&format!("⚠  {}", $text), 100) {
+                check_page!($y, $doc, $layer, 12.0);
+                $layer.use_text(&line, 7.5, Mm(margin_left + 2.0), Mm($y), $font);
+                $y -= line_height;
+            }
+        };
+    }
+
+    // ── Temperature Control ──
+    section!(y, current_layer, doc, "Temperature Control", &font_bold);
+    row3!(y, current_layer, doc, "ZONE", "RANGE", "GUIDELINE", &font_bold);
+    row3!(y, current_layer, doc, "Danger Zone", "41-135 °F (5-57 °C)", "Max 4 hours total", &font);
+    row3!(y, current_layer, doc, "Cold holding", "≤ 41 °F (5 °C)", "Keep cold foods at/below 41 °F", &font);
+    row3!(y, current_layer, doc, "Hot holding", "≥ 135 °F (57 °C)", "Keep hot foods at/above 135 °F", &font);
+    row3!(y, current_layer, doc, "Receiving", "≤ 41 °F / frozen solid", "Reject above 41 °F or partially thawed", &font);
+    y -= 4.0;
+
+    // ── Minimum Cooking Temperatures ──
+    section!(y, current_layer, doc, "Minimum Cooking Temperatures", &font_bold);
+    row3!(y, current_layer, doc, "FOOD", "INTERNAL TEMP", "HOLD TIME", &font_bold);
+    row3!(y, current_layer, doc, "Poultry", "165 °F (74 °C)", "Instantaneous", &font);
+    row3!(y, current_layer, doc, "Ground meat", "155 °F (68 °C)", "17 seconds", &font);
+    row3!(y, current_layer, doc, "Seafood, steaks, eggs", "145 °F (63 °C)", "15 seconds", &font);
+    row3!(y, current_layer, doc, "Roasts (beef/pork/lamb)", "145 °F (63 °C)", "4 minutes", &font);
+    row3!(y, current_layer, doc, "Vegetables, grains (hot)", "135 °F (57 °C)", "Instantaneous", &font);
+    row3!(y, current_layer, doc, "Reheated leftovers", "165 °F (74 °C)", "Within 2 hours", &font);
+    y -= 4.0;
+
+    // ── Two-Stage Cooling ──
+    section!(y, current_layer, doc, "Two-Stage Cooling", &font_bold);
+    row3!(y, current_layer, doc, "STAGE", "TARGET", "TIME LIMIT", &font_bold);
+    row3!(y, current_layer, doc, "Stage 1", "135 °F -> 70 °F", "Within 2 hours", &font);
+    row3!(y, current_layer, doc, "Stage 2", "70 °F -> 41 °F", "Within 4 hours (6 total)", &font);
+    note!(y, current_layer, doc, "If food does not reach 70 °F within 2 hours, reheat to 165 °F and restart.", &font);
+    y -= 4.0;
+
+    // ── Approved Thawing Methods ──
+    section!(y, current_layer, doc, "Approved Thawing Methods", &font_bold);
+    bullet!(y, current_layer, doc, "Refrigerator thawing — at 41 °F or below", &font);
+    bullet!(y, current_layer, doc, "Cold running water — submerged, ≤ 70 °F, used within 4 hours", &font);
+    bullet!(y, current_layer, doc, "Microwave — only if cooked immediately after", &font);
+    bullet!(y, current_layer, doc, "Cooking from frozen — as part of the cooking process", &font);
+    note!(y, current_layer, doc, "Never thaw food at room temperature on a counter.", &font);
+    y -= 4.0;
+
+    // ── Handwashing ──
+    section!(y, current_layer, doc, "Handwashing", &font_bold);
+    bullet!(y, current_layer, doc, "Wet hands with warm water (≥ 100 °F / 38 °C)", &font);
+    bullet!(y, current_layer, doc, "Apply soap and scrub for at least 20 seconds", &font);
+    bullet!(y, current_layer, doc, "Rinse and dry with single-use towel or air dryer", &font);
+    note!(y, current_layer, doc, "Required: before handling food, after touching raw meat, after using restroom, after sneezing/coughing, after handling trash.", &font);
+    y -= 4.0;
+
+    // ── Cross-Contamination Prevention ──
+    section!(y, current_layer, doc, "Cross-Contamination Prevention", &font_bold);
+    bullet!(y, current_layer, doc, "Store raw meats below ready-to-eat foods in the cooler", &font);
+    bullet!(y, current_layer, doc, "Cooler order (top to bottom): ready-to-eat, seafood, whole cuts, ground meat, poultry", &font);
+    bullet!(y, current_layer, doc, "Use separate cutting boards and utensils for raw and cooked foods", &font);
+    bullet!(y, current_layer, doc, "Sanitize surfaces between tasks — use approved sanitizer at correct concentration", &font);
+    y -= 4.0;
+
+    // ── Maximum Cold Storage ──
+    section!(y, current_layer, doc, "Maximum Cold Storage (at 41 °F)", &font_bold);
+    row2!(y, current_layer, doc, "ITEM", "MAX DAYS", &font_bold);
+    row2!(y, current_layer, doc, "Fresh poultry, ground meat, fish", "1 – 2 days", &font);
+    row2!(y, current_layer, doc, "Fresh steaks, chops, roasts", "3 – 5 days", &font);
+    row2!(y, current_layer, doc, "Cooked leftovers", "7 days (date-mark required)", &font);
+    row2!(y, current_layer, doc, "Deli meats (opened)", "3 – 5 days", &font);
+    row2!(y, current_layer, doc, "Eggs (shell)", "3 – 5 weeks", &font);
+    note!(y, current_layer, doc, "All ready-to-eat TCS foods held longer than 24 hours must be date-marked.", &font);
+    y -= 4.0;
+
+    // ── Big 6 Pathogens ──
+    section!(y, current_layer, doc, "Big 6 Foodborne Pathogens", &font_bold);
+    row2!(y, current_layer, doc, "PATHOGEN", "COMMON SOURCES", &font_bold);
+    row2!(y, current_layer, doc, "Norovirus", "Infected workers, ready-to-eat foods", &font);
+    row2!(y, current_layer, doc, "Salmonella Typhi", "Beverages, ready-to-eat foods", &font);
+    row2!(y, current_layer, doc, "Shigella spp.", "Ready-to-eat foods, contaminated water", &font);
+    row2!(y, current_layer, doc, "E. coli O157:H7", "Undercooked beef, unpasteurized juices", &font);
+    row2!(y, current_layer, doc, "Hepatitis A", "Shellfish, ready-to-eat foods", &font);
+    row2!(y, current_layer, doc, "Non-typhoidal Salmonella", "Poultry, eggs, produce", &font);
+    note!(y, current_layer, doc, "Employees diagnosed with any Big 6 illness must be excluded or restricted per FDA Food Code.", &font);
+
+    let _ = y; // suppress unused warning
+    let file = std::fs::File::create(&output_path).map_err(|e| e.to_string())?;
+    doc.save(&mut BufWriter::new(file)).map_err(|e| e.to_string())?;
+
+    Ok(PatchResponse {
+        ok: true,
+        message: format!("Exported FDA guidelines to {}", output_path),
+    })
+}
+
+// ──────────────────────────────────────────
+// Global search across all data
+// ──────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+struct GlobalSearchHit {
+    category: String,    // "item", "recipe", "vendor", "invoice"
+    id: i64,
+    label: String,
+    detail: String,
+}
+
+#[tauri::command]
+fn global_search(
+    app: tauri::AppHandle,
+    query: String,
+) -> Result<Vec<GlobalSearchHit>, String> {
+    let conn = open_initialized_db(&app)?;
+    let pattern = format!("%{}%", query.trim());
+    let mut hits: Vec<GlobalSearchHit> = Vec::new();
+
+    // Items
+    {
+        let mut stmt = conn
+            .prepare("SELECT item_id, name FROM items WHERE name LIKE ?1 ORDER BY name COLLATE NOCASE LIMIT 20")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&pattern], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            hits.push(GlobalSearchHit {
+                category: "item".into(),
+                id: r.0,
+                label: r.1,
+                detail: "Inventory item".into(),
+            });
+        }
+    }
+
+    // Recipes
+    {
+        let mut stmt = conn
+            .prepare("SELECT recipe_id, name FROM recipes WHERE name LIKE ?1 ORDER BY name COLLATE NOCASE LIMIT 20")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&pattern], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            hits.push(GlobalSearchHit {
+                category: "recipe".into(),
+                id: r.0,
+                label: r.1,
+                detail: "Recipe".into(),
+            });
+        }
+    }
+
+    // Vendors
+    {
+        let mut stmt = conn
+            .prepare("SELECT vendor_id, name FROM vendors WHERE name LIKE ?1 ORDER BY name COLLATE NOCASE LIMIT 20")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&pattern], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            hits.push(GlobalSearchHit {
+                category: "vendor".into(),
+                id: r.0,
+                label: r.1,
+                detail: "Vendor".into(),
+            });
+        }
+    }
+
+    // Invoices
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT inv_id, COALESCE(invoice_no, ''), COALESCE(v.name, '')
+                 FROM invoices i LEFT JOIN vendors v ON v.vendor_id = i.vendor_id
+                 WHERE i.invoice_no LIKE ?1 OR v.name LIKE ?1
+                 ORDER BY i.inv_id DESC LIMIT 20"
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&pattern], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows.flatten() {
+            hits.push(GlobalSearchHit {
+                category: "invoice".into(),
+                id: r.0,
+                label: format!("#{} — {}", r.1, r.2),
+                detail: "Invoice".into(),
+            });
+        }
+    }
+
+    Ok(hits)
 }
 
 // ──────────────────────────────────────────
@@ -4085,6 +4488,130 @@ fn calculate_food_cost(
     })
 }
 
+#[derive(Serialize)]
+struct SettingsResponse {
+    company_name: String,
+    logo_path: String,
+    service_category: String,
+    operation_size: String,
+}
+
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> Result<SettingsResponse, String> {
+    let conn = open_initialized_db(&app)?;
+    fn get_val(conn: &rusqlite::Connection, key: &str) -> String {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap_or_default()
+    }
+    Ok(SettingsResponse {
+        company_name: get_val(&conn, "company_name"),
+        logo_path: get_val(&conn, "logo_path"),
+        service_category: get_val(&conn, "service_category"),
+        operation_size: get_val(&conn, "operation_size"),
+    })
+}
+
+#[tauri::command]
+fn save_settings(
+    app: tauri::AppHandle,
+    company_name: String,
+    service_category: String,
+    operation_size: String,
+) -> Result<PatchResponse, String> {
+    let conn = open_initialized_db(&app)?;
+    let pairs = [
+        ("company_name", company_name.trim().to_string()),
+        ("service_category", service_category.trim().to_string()),
+        ("operation_size", operation_size.trim().to_string()),
+    ];
+    for (key, value) in &pairs {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(PatchResponse {
+        ok: true,
+        message: "Settings saved".to_string(),
+    })
+}
+
+#[tauri::command]
+fn upload_logo(app: tauri::AppHandle, source_path: String) -> Result<PatchResponse, String> {
+    let source = std::path::Path::new(&source_path);
+    if !source.exists() || !source.is_file() {
+        return Err(format!("File not found: {}", source_path));
+    }
+
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_else(|| "png".to_string());
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp") {
+        return Err(format!("Unsupported image format: .{}", ext));
+    }
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_data_root());
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let dest = data_dir.join(format!("company_logo.{}", ext));
+    std::fs::copy(source, &dest).map_err(|e| e.to_string())?;
+
+    let dest_str = dest.to_string_lossy().to_string();
+    let conn = open_initialized_db(&app)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('logo_path', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [&dest_str],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(PatchResponse {
+        ok: true,
+        message: format!("Logo saved to {}", dest_str),
+    })
+}
+
+#[tauri::command]
+fn remove_logo(app: tauri::AppHandle) -> Result<PatchResponse, String> {
+    let conn = open_initialized_db(&app)?;
+    let logo_path: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'logo_path'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+
+    if !logo_path.is_empty() {
+        let p = std::path::Path::new(&logo_path);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('logo_path', '')
+         ON CONFLICT(key) DO UPDATE SET value = ''",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(PatchResponse {
+        ok: true,
+        message: "Logo removed".to_string(),
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -4136,7 +4663,13 @@ pub fn run() {
             export_recipe_docx,
             preview_pdf_invoice,
             import_pdf_invoice,
-            calculate_food_cost
+            calculate_food_cost,
+            get_settings,
+            save_settings,
+            upload_logo,
+            remove_logo,
+            export_fda_pdf,
+            global_search
         ])
         .setup(|app| {
             let path = db_path(&app.handle())?;

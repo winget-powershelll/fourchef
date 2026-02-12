@@ -44,10 +44,88 @@ body {
 }
 
 .brand {
-  font-family: "Fraunces", serif;
-  font-size: 28px;
-  letter-spacing: 0.5px;
   margin-bottom: 22px;
+  text-align: center;
+}
+
+.brand-logo {
+  max-height: 189px;
+  width: auto;
+  mix-blend-mode: multiply;
+}
+
+/* ── Sidebar Search ── */
+.sidebar-search {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.sidebar-search-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.sidebar-search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(45, 106, 79, 0.15);
+}
+
+.sidebar-search-results {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 100;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.sidebar-search-hit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  color: var(--ink);
+  gap: 8px;
+}
+
+.sidebar-search-hit:hover {
+  background: var(--bg-0);
+}
+
+.search-hit-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-hit-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--ink-soft);
+  background: var(--bg-0);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 .nav-section {
@@ -123,7 +201,7 @@ body {
   box-shadow: var(--shadow);
 }
 
-.panel + .panel {
+.panel+.panel {
   margin-top: 18px;
 }
 
@@ -420,7 +498,45 @@ select {
 }
 
 .data-cols-6 {
-  grid-template-columns: 1.3fr 1.4fr 0.8fr 0.6fr 0.6fr 1.2fr;
+  grid-template-columns: 1.3fr 1fr 1fr 0.7fr 0.6fr 0.5fr;
+}
+
+.diff-up {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.diff-down {
+  color: #27ae60;
+  font-weight: 600;
+}
+
+.diff-zero {
+  color: var(--ink-soft);
+}
+
+/* ── Allergen notice ── */
+.allergen-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  color: #856404;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+
+.allergen-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.allergen-list {
+  font-weight: 600;
 }
 
 .data-cols-7 {
@@ -598,6 +714,7 @@ select {
   color: #fff;
   border: none;
 }
+
 .button.danger:hover {
   background: #b71c1c;
 }
@@ -678,6 +795,75 @@ select {
   font-weight: 600;
 }
 
+/* ── Settings page ── */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.settings-section {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.settings-section h3 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  letter-spacing: 0.3px;
+}
+
+.settings-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings-radio input[type="radio"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.settings-hint {
+  color: var(--ink-soft);
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+.settings-logo-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.settings-logo-preview img {
+  max-width: 120px;
+  max-height: 80px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: contain;
+  background: var(--panel-2);
+}
+
+@media (max-width: 800px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .button-link {
   background: none;
   border: none;
@@ -693,4 +879,77 @@ select {
 
 .button-link.danger:hover {
   background: rgba(211, 47, 47, 0.1);
+}
+
+/* ── FDA Guidelines ── */
+.fda-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.fda-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 20px;
+}
+
+.fda-card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.fda-card h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.fda-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.fda-table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.fda-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink);
+}
+
+.fda-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.fda-list {
+  margin: 0;
+  padding: 0 0 0 18px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.fda-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  background: #fff8e1;
+  border-left: 3px solid #f9a825;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #5d4037;
+  line-height: 1.5;
 }

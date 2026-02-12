@@ -167,6 +167,19 @@ struct ExportPathArgs {
 }
 
 #[derive(Serialize)]
+struct GlobalSearchArgs {
+    query: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct GlobalSearchHit {
+    category: String,
+    id: i64,
+    label: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
 struct ExportRecipeArgs {
     #[serde(rename = "recipeId")]
     recipe_id: i64,
@@ -266,6 +279,8 @@ struct InventoryDetailPrice {
     vendor_id: Option<i64>,
     vendor_name: String,
     price: Option<f64>,
+    prev_price: Option<f64>,
+    diff_pct: Option<f64>,
     pack: String,
     status: Option<i64>,
 }
@@ -411,6 +426,8 @@ struct RecipeDetailResponse {
     missing_costs: i64,
     instructions: String,
     ingredients: Vec<RecipeIngredient>,
+    #[serde(default)]
+    allergens: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -611,6 +628,30 @@ struct FoodCostLineInput {
     #[serde(rename = "unitId")]
     unit_id: Option<i64>,
     qty: f64,
+}
+
+#[derive(Serialize)]
+struct SaveSettingsArgs {
+    #[serde(rename = "companyName")]
+    company_name: String,
+    #[serde(rename = "serviceCategory")]
+    service_category: String,
+    #[serde(rename = "operationSize")]
+    operation_size: String,
+}
+
+#[derive(Serialize)]
+struct UploadLogoArgs {
+    #[serde(rename = "sourcePath")]
+    source_path: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct SettingsResponse {
+    company_name: String,
+    logo_path: String,
+    service_category: String,
+    operation_size: String,
 }
 
 #[derive(Serialize)]
@@ -1671,6 +1712,101 @@ pub fn App() -> impl IntoView {
     let (fc_add_qty, set_fc_add_qty) = signal(String::new());
     let (fc_dish_name, set_fc_dish_name) = signal(String::new());
 
+    // ── Settings state ──
+    let (settings_company, set_settings_company) = signal(String::new());
+    let (settings_logo_path, set_settings_logo_path) = signal(String::new());
+    let (settings_service_cat, set_settings_service_cat) = signal(String::new());
+    let (settings_op_size, set_settings_op_size) = signal(String::new());
+    let (settings_status, set_settings_status) = signal(String::new());
+    let (settings_loaded, set_settings_loaded) = signal(false);
+    let (settings_logo_upload_path, set_settings_logo_upload_path) = signal(String::new());
+
+    let load_settings = move || {
+        spawn_local(async move {
+            let args = to_value(&PingArgs {}).unwrap();
+            match invoke_cmd::<SettingsResponse>("get_settings", args).await {
+                Ok(s) => {
+                    set_settings_company.set(s.company_name);
+                    set_settings_logo_path.set(s.logo_path);
+                    set_settings_service_cat.set(s.service_category);
+                    set_settings_op_size.set(s.operation_size);
+                    set_settings_loaded.set(true);
+                }
+                Err(err) => {
+                    set_settings_status.set(format!("Failed to load settings: {err}"));
+                }
+            }
+        });
+    };
+
+    let show_settings = move || {
+        set_active_panel.set("settings".to_string());
+        if !settings_loaded.get() {
+            load_settings();
+        }
+    };
+
+    let show_fda = move || {
+        set_active_panel.set("fda".to_string());
+    };
+
+    let save_settings_action = move || {
+        let company_name = settings_company.get();
+        let service_category = settings_service_cat.get();
+        let operation_size = settings_op_size.get();
+        set_settings_status.set("Saving...".to_string());
+        spawn_local(async move {
+            let args = to_value(&SaveSettingsArgs {
+                company_name,
+                service_category,
+                operation_size,
+            })
+            .unwrap();
+            match invoke_cmd::<PatchResponse>("save_settings", args).await {
+                Ok(resp) => set_settings_status.set(resp.message),
+                Err(err) => set_settings_status.set(format!("Save failed: {err}")),
+            }
+        });
+    };
+
+    let upload_logo_action = move || {
+        let source = settings_logo_upload_path.get();
+        if source.trim().is_empty() {
+            set_settings_status.set("Enter a logo file path".to_string());
+            return;
+        }
+        set_settings_status.set("Uploading logo...".to_string());
+        spawn_local(async move {
+            let args = to_value(&UploadLogoArgs { source_path: source }).unwrap();
+            match invoke_cmd::<PatchResponse>("upload_logo", args).await {
+                Ok(resp) => {
+                    set_settings_status.set(resp.message);
+                    // reload to get the new path
+                    let args2 = to_value(&PingArgs {}).unwrap();
+                    if let Ok(s) = invoke_cmd::<SettingsResponse>("get_settings", args2).await {
+                        set_settings_logo_path.set(s.logo_path);
+                    }
+                    set_settings_logo_upload_path.set(String::new());
+                }
+                Err(err) => set_settings_status.set(format!("Upload failed: {err}")),
+            }
+        });
+    };
+
+    let remove_logo_action = move || {
+        set_settings_status.set("Removing logo...".to_string());
+        spawn_local(async move {
+            let args = to_value(&PingArgs {}).unwrap();
+            match invoke_cmd::<PatchResponse>("remove_logo", args).await {
+                Ok(resp) => {
+                    set_settings_status.set(resp.message);
+                    set_settings_logo_path.set(String::new());
+                }
+                Err(err) => set_settings_status.set(format!("Remove failed: {err}")),
+            }
+        });
+    };
+
     let show_foodcost = move || {
         set_active_panel.set("foodcost".to_string());
         if fc_item_options.get().is_empty() {
@@ -2194,6 +2330,46 @@ pub fn App() -> impl IntoView {
         );
     };
 
+    // ── FDA PDF export ──
+    let export_fda_pdf = move || {
+        trigger_save_dialog_and_export(
+            "Save FDA Guidelines PDF",
+            "fda-guidelines.pdf",
+            "PDF",
+            "pdf",
+            set_export_status,
+            |path| ("export_fda_pdf".to_string(), to_value(&ExportPathArgs { output_path: path }).unwrap()),
+        );
+    };
+
+    // ── Global search signals ──
+    let (search_query, set_search_query) = signal(String::new());
+    let (search_results, set_search_results) = signal(Vec::<GlobalSearchHit>::new());
+    let (_search_loading, set_search_loading) = signal(false);
+
+    let do_global_search = move || {
+        let q = search_query.get();
+        if q.trim().is_empty() {
+            set_search_results.set(Vec::new());
+            return;
+        }
+        set_search_loading.set(true);
+        spawn_local(async move {
+            let args = to_value(&GlobalSearchArgs { query: q }).unwrap();
+            match JsFuture::from(invoke("global_search", args)).await {
+                Ok(val) => {
+                    if let Ok(hits) = serde_wasm_bindgen::from_value::<Vec<GlobalSearchHit>>(val) {
+                        set_search_results.set(hits);
+                    }
+                }
+                Err(_) => {
+                    set_search_results.set(Vec::new());
+                }
+            }
+            set_search_loading.set(false);
+        });
+    };
+
     // ── PDF Invoice import signals ──
     let (pdf_preview, set_pdf_preview) = signal(Option::<PdfInvoicePreview>::None);
     let (pdf_import_status, set_pdf_import_status) = signal(String::new());
@@ -2204,7 +2380,61 @@ pub fn App() -> impl IntoView {
     view! {
         <div class="app-shell">
             <aside class="sidebar">
-                <div class="brand">"4chef"</div>
+                <div class="brand">
+                    <img src="public/4chef-logo.png" alt="4chef" class="brand-logo" />
+                </div>
+                <div class="sidebar-search">
+                    <input
+                        type="text"
+                        class="sidebar-search-input"
+                        placeholder="Search everything..."
+                        prop:value=move || search_query.get()
+                        on:input=move |ev| {
+                            let val = event_target_value(&ev);
+                            set_search_query.set(val);
+                            do_global_search();
+                        }
+                        on:keydown=move |ev| {
+                            if ev.key() == "Escape" {
+                                set_search_query.set(String::new());
+                                set_search_results.set(Vec::new());
+                            }
+                        }
+                    />
+                    <Show when=move || !search_results.get().is_empty()>
+                        <div class="sidebar-search-results">
+                            <For
+                                each=move || search_results.get()
+                                key=|hit| format!("{}-{}", hit.category, hit.id)
+                                children=move |hit: GlobalSearchHit| {
+                                    let cat = hit.category.clone();
+                                    let label = hit.label.clone();
+                                    let detail = hit.detail.clone();
+                                    view! {
+                                        <button
+                                            class="sidebar-search-hit"
+                                            type="button"
+                                            on:click=move |_| {
+                                                match cat.as_str() {
+                                                    "item" => set_active_panel.set("inventory".to_string()),
+                                                    "recipe" => set_active_panel.set("recipes".to_string()),
+                                                    "vendor" => set_active_panel.set("vendors".to_string()),
+                                                    "invoice" => set_active_panel.set("purchasing".to_string()),
+                                                    _ => {}
+                                                }
+                                                set_search_query.set(String::new());
+                                                set_search_results.set(Vec::new());
+                                            }
+                                        >
+                                            <span class="search-hit-label">{label.clone()}</span>
+                                            <span class="search-hit-badge">{detail.clone()}</span>
+                                        </button>
+                                    }
+                                }
+                            />
+                        </div>
+                    </Show>
+                </div>
                 <div class="nav-section">
                     <div class="nav-label">"Modules"</div>
                     <button
@@ -2272,6 +2502,25 @@ pub fn App() -> impl IntoView {
                         "Food Cost"
                     </button>
                 </div>
+                <div class="nav-section">
+                    <div class="nav-label">"System"</div>
+                    <button
+                        class="nav-item"
+                        class:active=move || active_panel.get() == "settings"
+                        on:click=move |_| show_settings()
+                        type="button"
+                    >
+                        "Settings"
+                    </button>
+                    <button
+                        class="nav-item"
+                        class:active=move || active_panel.get() == "fda"
+                        on:click=move |_| show_fda()
+                        type="button"
+                    >
+                        "FDA Guidelines"
+                    </button>
+                </div>
             </aside>
             <main class="main">
                 <div class="topbar">
@@ -2292,6 +2541,8 @@ pub fn App() -> impl IntoView {
                                     "reports" => "Data Health".to_string(),
                                     "purchasing" => "Purchasing".to_string(),
                                     "foodcost" => "Food Cost Calculator".to_string(),
+                                    "settings" => "General Settings".to_string(),
+                                    "fda" => "FDA Guidelines".to_string(),
                                     _ => "4chef".to_string(),
                                 }
                             }}
@@ -2308,6 +2559,8 @@ pub fn App() -> impl IntoView {
                                     "reports" => "Track missing data that blocks accurate costing.".to_string(),
                                     "purchasing" => "Browse invoices and transaction lines.".to_string(),
                                     "foodcost" => "Build a dish, set your target %, and find the right menu price.".to_string(),
+                                    "settings" => "Company info and preferences.".to_string(),
+                                    "fda" => "Quick-reference FDA food safety guidelines for your kitchen.".to_string(),
                                     _ => "Organize. Optimize. Itemize. Done."
                                         .to_string(),
                                 }
@@ -3214,22 +3467,38 @@ pub fn App() -> impl IntoView {
                                                 <div class="detail-block">
                                                     <strong>"Vendor Prices"</strong>
                                                     <div class="data-table">
-                                                        <div class="data-header data-cols-4">
+                                                        <div class="data-header data-cols-6">
                                                             <span>"Vendor"</span>
-                                                            <span>"Price"</span>
+                                                            <span>"Current Price"</span>
+                                                            <span>"Previous Price"</span>
+                                                            <span>"Diff %"</span>
                                                             <span>"Pack"</span>
                                                             <span>"Status"</span>
                                                         </div>
                                                         <For
                                                             each=move || detail.prices.clone()
                                                             key=|price| price.vendor_id.unwrap_or(0)
-                                                            children=move |price| view! {
-                                                                <div class="data-row data-cols-4">
-                                                                    <span>{price.vendor_name}</span>
-                                                                    <span>{price.price.map(format_money).unwrap_or_else(|| "-".to_string())}</span>
-                                                                    <span>{price.pack}</span>
-                                                                    <span>{price.status.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
-                                                                </div>
+                                                            children=move |price| {
+                                                                let diff_class = match price.diff_pct {
+                                                                    Some(d) if d > 0.0 => "diff-up",
+                                                                    Some(d) if d < 0.0 => "diff-down",
+                                                                    Some(_) => "diff-zero",
+                                                                    None => "",
+                                                                };
+                                                                let diff_text = match price.diff_pct {
+                                                                    Some(d) => format!("{:+.1}%", d),
+                                                                    None => "-".to_string(),
+                                                                };
+                                                                view! {
+                                                                    <div class="data-row data-cols-6">
+                                                                        <span>{price.vendor_name}</span>
+                                                                        <span>{price.price.map(format_money).unwrap_or_else(|| "-".to_string())}</span>
+                                                                        <span>{price.prev_price.map(format_money).unwrap_or_else(|| "-".to_string())}</span>
+                                                                        <span class={diff_class}>{diff_text}</span>
+                                                                        <span>{price.pack}</span>
+                                                                        <span>{price.status.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
+                                                                    </div>
+                                                                }
                                                             }
                                                         />
                                                     </div>
@@ -3567,6 +3836,18 @@ pub fn App() -> impl IntoView {
                                                         }}
                                                     </span>
                                                 </div>
+                                                <Show when={
+                                                    let has = !detail.allergens.is_empty();
+                                                    move || has
+                                                }>
+                                                    <div class="allergen-notice">
+                                                        <span class="allergen-icon">{"\u{26A0}"}</span>
+                                                        <strong>"Allergen Notice: "</strong>
+                                                        <span class="allergen-list">
+                                                            {detail.allergens.join(", ")}
+                                                        </span>
+                                                    </div>
+                                                </Show>
                                                 <div class="row" style="margin: 10px 0; gap: 8px;">
                                                     <button class="button tiny" on:click=move |_| {
                                                         let rid = recipe_id_for_export;
@@ -4817,6 +5098,267 @@ pub fn App() -> impl IntoView {
                                 }
                             }}
                         </Show>
+                    </div>
+                </Show>
+                <Show when=move || active_panel.get() == "settings">
+                    <div class="panel">
+                        <div class="settings-grid">
+                            <div class="settings-section">
+                                <h3>"Company Information"</h3>
+                                <div class="input">
+                                    <label>"Restaurant / Company Name"</label>
+                                    <input
+                                        type="text"
+                                        placeholder="e.g. The Golden Fork"
+                                        prop:value=move || settings_company.get()
+                                        on:input=move |ev| {
+                                            set_settings_company.set(event_target_value(&ev));
+                                        }
+                                    />
+                                </div>
+                                <div class="input" style="margin-top: 14px;">
+                                    <label>"Company Logo"</label>
+                                    <Show
+                                        when=move || !settings_logo_path.get().is_empty()
+                                        fallback=move || view! {
+                                            <p class="settings-hint">"No logo uploaded yet."</p>
+                                        }
+                                    >
+                                        <div class="settings-logo-preview">
+                                            <img
+                                                src={move || {
+                                                    let p = settings_logo_path.get();
+                                                    if p.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!("asset://localhost/{}", p)
+                                                    }
+                                                }}
+                                                alt="Company logo"
+                                            />
+                                            <button
+                                                class="button tiny danger"
+                                                on:click=move |_| remove_logo_action()
+                                            >"Remove"</button>
+                                        </div>
+                                    </Show>
+                                    <div class="row" style="margin-top: 8px; gap: 8px;">
+                                        <input
+                                            type="text"
+                                            placeholder="Path to logo file (PNG, JPG, SVG...)"
+                                            style="flex: 1;"
+                                            prop:value=move || settings_logo_upload_path.get()
+                                            on:input=move |ev| {
+                                                set_settings_logo_upload_path.set(event_target_value(&ev));
+                                            }
+                                        />
+                                        <button
+                                            class="button tiny"
+                                            on:click=move |_| upload_logo_action()
+                                        >"Upload"</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="settings-section">
+                                <h3>"Food Service Category"</h3>
+                                <div class="settings-radio-group">
+                                    {[
+                                        ("full_service", "Full Service"),
+                                        ("quick_service", "Quick Service"),
+                                        ("fast_casual", "Fast Casual"),
+                                        ("self_service", "Self-Service"),
+                                        ("delivery_takeaway", "Delivery & Takeaway"),
+                                    ].into_iter().map(|(value, label)| {
+                                        let value_owned = value.to_string();
+                                        let value_check = value.to_string();
+                                        view! {
+                                            <label class="settings-radio">
+                                                <input
+                                                    type="radio"
+                                                    name="service_category"
+                                                    value={value_owned.clone()}
+                                                    prop:checked=move || settings_service_cat.get() == value_check
+                                                    on:change={
+                                                        let v = value_owned.clone();
+                                                        move |_| set_settings_service_cat.set(v.clone())
+                                                    }
+                                                />
+                                                {label}
+                                            </label>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </div>
+                            </div>
+                            <div class="settings-section">
+                                <h3>"Operation Size"</h3>
+                                <div class="settings-radio-group">
+                                    {[
+                                        ("small_business", "Small Business (5\u{2013}50 employees)"),
+                                        ("franchise", "Franchise"),
+                                        ("chain", "Chain"),
+                                    ].into_iter().map(|(value, label)| {
+                                        let value_owned = value.to_string();
+                                        let value_check = value.to_string();
+                                        view! {
+                                            <label class="settings-radio">
+                                                <input
+                                                    type="radio"
+                                                    name="operation_size"
+                                                    value={value_owned.clone()}
+                                                    prop:checked=move || settings_op_size.get() == value_check
+                                                    on:change={
+                                                        let v = value_owned.clone();
+                                                        move |_| set_settings_op_size.set(v.clone())
+                                                    }
+                                                />
+                                                {label}
+                                            </label>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row" style="margin-top: 20px; gap: 8px;">
+                            <button
+                                class="button"
+                                on:click=move |_| save_settings_action()
+                            >"Save Settings"</button>
+                        </div>
+                        <Show when=move || !settings_status.get().is_empty()>
+                            <div class="status" style="margin-top: 10px;">{move || settings_status.get()}</div>
+                        </Show>
+                    </div>
+                </Show>
+
+                // ── FDA Guidelines Panel ──
+                <Show when=move || active_panel.get() == "fda">
+                    <div class="panel">
+                        <div class="fda-toolbar">
+                            <button class="button tiny" on:click=move |_| export_fda_pdf()>"Export PDF"</button>
+                        </div>
+                        <div class="fda-grid">
+
+                            // ── Temperature Control ──
+                            <div class="fda-card">
+                                <h3>"Temperature Control"</h3>
+                                <table class="fda-table">
+                                    <thead><tr>
+                                        <th>"Zone"</th><th>"Range"</th><th>"Guideline"</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <tr><td>"Danger Zone"</td><td>"41 °F – 135 °F (5 °C – 57 °C)"</td><td>"Food must not remain in this range for more than 4 hours total."</td></tr>
+                                        <tr><td>"Cold holding"</td><td>"≤ 41 °F (5 °C)"</td><td>"Keep cold foods at or below 41 °F at all times."</td></tr>
+                                        <tr><td>"Hot holding"</td><td>"≥ 135 °F (57 °C)"</td><td>"Keep hot foods at or above 135 °F."</td></tr>
+                                        <tr><td>"Receiving"</td><td>"≤ 41 °F / frozen solid"</td><td>"Reject deliveries above 41 °F (refrigerated) or partially thawed (frozen)."</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            // ── Cooking Temperatures ──
+                            <div class="fda-card">
+                                <h3>"Minimum Cooking Temperatures"</h3>
+                                <table class="fda-table">
+                                    <thead><tr>
+                                        <th>"Food"</th><th>"Internal Temp"</th><th>"Hold Time"</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <tr><td>"Poultry (chicken, turkey, duck)"</td><td>"165 °F (74 °C)"</td><td>"Instantaneous"</td></tr>
+                                        <tr><td>"Ground meat (beef, pork, lamb)"</td><td>"155 °F (68 °C)"</td><td>"17 seconds"</td></tr>
+                                        <tr><td>"Seafood, steaks, chops, eggs for service"</td><td>"145 °F (63 °C)"</td><td>"15 seconds"</td></tr>
+                                        <tr><td>"Roasts (beef, pork, lamb)"</td><td>"145 °F (63 °C)"</td><td>"4 minutes"</td></tr>
+                                        <tr><td>"Fruits, vegetables, grains (hot holding)"</td><td>"135 °F (57 °C)"</td><td>"Instantaneous"</td></tr>
+                                        <tr><td>"Reheated leftovers"</td><td>"165 °F (74 °C)"</td><td>"Within 2 hours"</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            // ── Cooling Requirements ──
+                            <div class="fda-card">
+                                <h3>"Two-Stage Cooling"</h3>
+                                <table class="fda-table">
+                                    <thead><tr>
+                                        <th>"Stage"</th><th>"Target"</th><th>"Time Limit"</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <tr><td>"Stage 1"</td><td>"135 °F → 70 °F"</td><td>"Within 2 hours"</td></tr>
+                                        <tr><td>"Stage 2"</td><td>"70 °F → 41 °F"</td><td>"Within 4 hours (6 hours total)"</td></tr>
+                                    </tbody>
+                                </table>
+                                <p class="fda-note">"If food does not reach 70 °F within 2 hours, it must be reheated to 165 °F and the cooling process restarted."</p>
+                            </div>
+
+                            // ── Thawing Methods ──
+                            <div class="fda-card">
+                                <h3>"Approved Thawing Methods"</h3>
+                                <ul class="fda-list">
+                                    <li>"Refrigerator thawing — at 41 °F or below"</li>
+                                    <li>"Cold running water — submerged, ≤ 70 °F, used within 4 hours"</li>
+                                    <li>"Microwave — only if cooked immediately after"</li>
+                                    <li>"Cooking from frozen — as part of the cooking process"</li>
+                                </ul>
+                                <p class="fda-note">"Never thaw food at room temperature on a counter."</p>
+                            </div>
+
+                            // ── Handwashing ──
+                            <div class="fda-card">
+                                <h3>"Handwashing"</h3>
+                                <ul class="fda-list">
+                                    <li>"Wet hands with warm water (≥ 100 °F / 38 °C)"</li>
+                                    <li>"Apply soap and scrub for at least 20 seconds"</li>
+                                    <li>"Rinse and dry with single-use towel or air dryer"</li>
+                                </ul>
+                                <p class="fda-note">"Required: before handling food, after touching raw meat, after using the restroom, after sneezing/coughing, after handling trash."</p>
+                            </div>
+
+                            // ── Cross-Contamination ──
+                            <div class="fda-card">
+                                <h3>"Cross-Contamination Prevention"</h3>
+                                <ul class="fda-list">
+                                    <li>"Store raw meats below ready-to-eat foods in the cooler"</li>
+                                    <li>"Cooler order (top → bottom): ready-to-eat, seafood, whole cuts, ground meat, poultry"</li>
+                                    <li>"Use separate cutting boards and utensils for raw and cooked foods"</li>
+                                    <li>"Sanitize surfaces between tasks — use approved sanitizer at correct concentration"</li>
+                                </ul>
+                            </div>
+
+                            // ── Storage Shelf-Life ──
+                            <div class="fda-card">
+                                <h3>"Maximum Cold Storage (at 41 °F)"</h3>
+                                <table class="fda-table">
+                                    <thead><tr>
+                                        <th>"Item"</th><th>"Max Days"</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <tr><td>"Fresh poultry, ground meat, fish"</td><td>"1 – 2 days"</td></tr>
+                                        <tr><td>"Fresh steaks, chops, roasts"</td><td>"3 – 5 days"</td></tr>
+                                        <tr><td>"Cooked leftovers"</td><td>"7 days (date-mark required)"</td></tr>
+                                        <tr><td>"Deli meats (opened)"</td><td>"3 – 5 days"</td></tr>
+                                        <tr><td>"Eggs (shell)"</td><td>"3 – 5 weeks"</td></tr>
+                                    </tbody>
+                                </table>
+                                <p class="fda-note">"All ready-to-eat TCS foods held longer than 24 hours must be date-marked."</p>
+                            </div>
+
+                            // ── Big 6 Pathogens ──
+                            <div class="fda-card">
+                                <h3>"Big 6 Foodborne Pathogens"</h3>
+                                <table class="fda-table">
+                                    <thead><tr>
+                                        <th>"Pathogen"</th><th>"Common Sources"</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        <tr><td>"Norovirus"</td><td>"Infected workers, ready-to-eat foods"</td></tr>
+                                        <tr><td>"Salmonella Typhi"</td><td>"Beverages, ready-to-eat foods"</td></tr>
+                                        <tr><td>"Shigella spp."</td><td>"Ready-to-eat foods, contaminated water"</td></tr>
+                                        <tr><td>"E. coli O157:H7"</td><td>"Undercooked beef, unpasteurized juices"</td></tr>
+                                        <tr><td>"Hepatitis A"</td><td>"Shellfish, ready-to-eat foods"</td></tr>
+                                        <tr><td>"Non-typhoidal Salmonella"</td><td>"Poultry, eggs, produce"</td></tr>
+                                    </tbody>
+                                </table>
+                                <p class="fda-note">"Employees diagnosed with any Big 6 illness must be excluded or restricted per FDA Food Code."</p>
+                            </div>
+
+                        </div>
                     </div>
                 </Show>
             </main>
