@@ -30,6 +30,10 @@ struct ImportMdfArgs {
 #[derive(Serialize)]
 struct InventoryQueryArgs {
     query: String,
+    #[serde(rename = "foodCategory")]
+    food_category: String,
+    #[serde(rename = "orderBy")]
+    order_by: String,
     limit: u32,
     offset: u32,
 }
@@ -184,6 +188,24 @@ struct ExportPathArgs {
 }
 
 #[derive(Serialize)]
+struct ExportInventoryArgs {
+    #[serde(rename = "outputPath")]
+    output_path: String,
+    #[serde(rename = "groupBy")]
+    group_by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UpdateItemCategoryArgs {
+    #[serde(rename = "itemId")]
+    item_id: i64,
+    #[serde(rename = "foodCategory")]
+    food_category: String,
+    #[serde(rename = "storageType")]
+    storage_type: String,
+}
+
+#[derive(Serialize)]
 struct GlobalSearchArgs {
     query: String,
 }
@@ -268,6 +290,12 @@ struct InventoryItem {
     item_id: i64,
     name: String,
     status: Option<i64>,
+    #[serde(default)]
+    food_category: String,
+    #[serde(default)]
+    storage_type: String,
+    #[serde(default)]
+    vendor_name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -332,6 +360,10 @@ struct InventoryDetailResponse {
     item_id: i64,
     name: String,
     status: Option<i64>,
+    #[serde(default)]
+    food_category: String,
+    #[serde(default)]
+    storage_type: String,
     purch_units: Vec<InventoryDetailUnit>,
     prices: Vec<InventoryDetailPrice>,
     conversions: Vec<InventoryDetailConversion>,
@@ -762,6 +794,8 @@ fn format_money(value: f64) -> String {
 
 fn trigger_inventory_fetch(
     query: String,
+    food_category: String,
+    order_by: String,
     page: usize,
     limit: usize,
     set_loading: WriteSignal<bool>,
@@ -778,6 +812,8 @@ fn trigger_inventory_fetch(
     spawn_local(async move {
         let args = to_value(&InventoryQueryArgs {
             query,
+            food_category,
+            order_by,
             limit: limit as u32,
             offset: offset as u32,
         })
@@ -1332,13 +1368,15 @@ pub fn App() -> impl IntoView {
 
     let inventory_limit: usize = 50;
     let (inventory_query, set_inventory_query) = signal(String::new());
+    let (inventory_food_category, set_inventory_food_category) = signal(String::new());
+    let (inventory_order_by, set_inventory_order_by) = signal(String::new());
     let (inventory_items, set_inventory_items) = signal(Vec::<InventoryItem>::new());
     let (inventory_total, set_inventory_total) = signal(0i64);
     let (inventory_filtered, set_inventory_filtered) = signal(0i64);
     let (inventory_page, set_inventory_page) = signal(0usize);
     let (inventory_status, set_inventory_status) = signal(String::new());
     let (inventory_loading, set_inventory_loading) = signal(false);
-    let (inventory_loaded, set_inventory_loaded) = signal(false);
+    let (_inventory_loaded, set_inventory_loaded) = signal(false);
     let (inventory_selected, set_inventory_selected) =
         signal(Option::<InventoryDetailResponse>::None);
     let (inventory_detail_status, set_inventory_detail_status) = signal(String::new());
@@ -1564,25 +1602,29 @@ pub fn App() -> impl IntoView {
 
     let show_inventory = move || {
         set_active_panel.set("inventory".to_string());
+        set_inventory_food_category.set(String::new());
         if editor_vendor_options.get().is_empty() {
             trigger_vendor_options_fetch(set_editor_vendor_options);
         }
         if unit_options.get().is_empty() {
             trigger_unit_options_fetch(set_unit_options);
         }
-        if !inventory_loaded.get() {
-            trigger_inventory_fetch(
-                inventory_query.get(),
-                inventory_page.get(),
-                inventory_limit,
-                set_inventory_loading,
-                set_inventory_status,
-                set_inventory_items,
-                set_inventory_total,
-                set_inventory_filtered,
-                set_inventory_loaded,
-            );
-        }
+        // Always re-fetch when switching modes
+        set_inventory_loaded.set(false);
+        set_inventory_page.set(0);
+        trigger_inventory_fetch(
+            inventory_query.get(),
+            String::new(),
+            inventory_order_by.get(),
+            0,
+            inventory_limit,
+            set_inventory_loading,
+            set_inventory_status,
+            set_inventory_items,
+            set_inventory_total,
+            set_inventory_filtered,
+            set_inventory_loaded,
+        );
     };
 
     let show_recipes = move || {
@@ -2137,6 +2179,9 @@ pub fn App() -> impl IntoView {
     let (edit_item_name, set_edit_item_name) = signal(String::new());
     let (edit_item_status, set_edit_item_status) = signal(String::new());
     let (edit_item_msg, set_edit_item_msg) = signal(String::new());
+    let (edit_item_food_category, set_edit_item_food_category) = signal(String::new());
+    let (edit_item_storage_type, set_edit_item_storage_type) = signal(String::new());
+    let (edit_item_category_msg, set_edit_item_category_msg) = signal(String::new());
 
     let save_item_edit = move |item_id: i64| {
         let name = edit_item_name.get();
@@ -2162,6 +2207,8 @@ pub fn App() -> impl IntoView {
                     // Refresh list
                     trigger_inventory_fetch(
                         inventory_query.get(),
+                        inventory_food_category.get(),
+                        inventory_order_by.get(),
                         inventory_page.get(),
                         inventory_limit,
                         set_inventory_loading,
@@ -2326,24 +2373,26 @@ pub fn App() -> impl IntoView {
     }
 
     let export_inventory_pdf = move || {
+        let gb = inventory_order_by.get();
         trigger_save_dialog_and_export(
             "Save Inventory PDF",
             "inventory.pdf",
             "PDF",
             "pdf",
             set_export_status,
-            |path| ("export_inventory_pdf".to_string(), to_value(&ExportPathArgs { output_path: path }).unwrap()),
+            move |path| ("export_inventory_pdf".to_string(), to_value(&ExportInventoryArgs { output_path: path, group_by: if gb.is_empty() { None } else { Some(gb) } }).unwrap()),
         );
     };
 
     let export_inventory_docx = move || {
+        let gb = inventory_order_by.get();
         trigger_save_dialog_and_export(
             "Save Inventory Word Document",
             "inventory.docx",
             "Word Document",
             "docx",
             set_export_status,
-            |path| ("export_inventory_docx".to_string(), to_value(&ExportPathArgs { output_path: path }).unwrap()),
+            move |path| ("export_inventory_docx".to_string(), to_value(&ExportInventoryArgs { output_path: path, group_by: if gb.is_empty() { None } else { Some(gb) } }).unwrap()),
         );
     };
 
@@ -2398,7 +2447,7 @@ pub fn App() -> impl IntoView {
         <div class="app-shell">
             <aside class="sidebar">
                 <div class="brand">
-                    <img src="public/4chef-logo.png" alt="4chef" class="brand-logo" />
+                    <img src="/public/4chef-logo.png" alt="4chef" class="brand-logo" />
                 </div>
                 <div class="sidebar-search">
                     <input
@@ -2470,6 +2519,7 @@ pub fn App() -> impl IntoView {
                     >
                         "Inventory"
                     </button>
+
                     <button
                         class="nav-item"
                         class:active=move || active_panel.get() == "recipes"
@@ -2567,8 +2617,7 @@ pub fn App() -> impl IntoView {
                         <div class="subtitle">
                             {move || {
                                 match active_panel.get().as_str() {
-                                    "inventory" => "Search and inspect inventory items in your 4chef library."
-                                        .to_string(),
+                                    "inventory" => "Search and inspect inventory items in your 4chef library.".to_string(),
                                     "recipes" => "Cost recipes using purchase units and conversions."
                                         .to_string(),
                                     "vendors" => "Search vendors and review their priced items.".to_string(),
@@ -3194,12 +3243,26 @@ pub fn App() -> impl IntoView {
                                     }
                                 />
                             </div>
+                            <div class="input">
+                                <label>"Organize by"</label>
+                                <select
+                                    prop:value=inventory_order_by
+                                    on:change=move |ev| {
+                                        set_inventory_order_by.set(event_target_value(&ev));
+                                    }
+                                >
+                                    <option value="">"Alphabetically"</option>
+                                    <option value="vendor">"By Vendor"</option>
+                                </select>
+                            </div>
                             <div class="input" style="align-self: end;">
                                 <div class="row">
                                     <button class="button" on:click=move |_| {
                                         set_inventory_page.set(0);
                                         trigger_inventory_fetch(
                                             inventory_query.get(),
+                                            inventory_food_category.get(),
+                                            inventory_order_by.get(),
                                             0,
                                             inventory_limit,
                                             set_inventory_loading,
@@ -3214,8 +3277,12 @@ pub fn App() -> impl IntoView {
                                     </button>
                                     <button class="button secondary" on:click=move |_| {
                                         set_inventory_query.set(String::new());
+                                        set_inventory_order_by.set(String::new());
                                         set_inventory_page.set(0);
+                                        set_inventory_food_category.set(String::new());
                                         trigger_inventory_fetch(
+                                            String::new(),
+                                            String::new(),
                                             String::new(),
                                             0,
                                             inventory_limit,
@@ -3249,7 +3316,7 @@ pub fn App() -> impl IntoView {
                                         )}
                                     </div>
                                 </div>
-                                <div style="margin-left: auto; display: flex; gap: 8px;">
+                                <div style="margin-left: auto; display: flex; gap: 8px; align-items: end;">
                                     <button class="button tiny" on:click=move |_| export_inventory_pdf()>"Export PDF"</button>
                                     <button class="button tiny secondary" on:click=move |_| export_inventory_docx()>"Export Word"</button>
                                 </div>
@@ -3259,35 +3326,55 @@ pub fn App() -> impl IntoView {
                             </Show>
                             <div class="inventory-table">
                                 <div class="inventory-header">
-                                    <span>"Item ID"</span>
+                                    <span>"ID"</span>
                                     <span>"Name"</span>
                                     <span>"Status"</span>
                                 </div>
-                                <For
-                                    each=move || inventory_items.get()
-                                    key=|item| item.item_id
-                                    children=move |item| {
+                                {move || {
+                                    let items = inventory_items.get();
+                                    let order = inventory_order_by.get();
+                                    let mut last_group = String::new();
+                                    items.iter().map(|item| {
+                                        let group_label = match order.as_str() {
+                                            "vendor" => {
+                                                let vn = &item.vendor_name;
+                                                if vn.is_empty() || vn == "<No Vendor>" { "No Vendor".to_string() } else { vn.clone() }
+                                            },
+                                            _ => String::new(),
+                                        };
+                                        let show_header = !group_label.is_empty() && group_label != last_group;
+                                        if show_header { last_group = group_label.clone(); }
                                         let item_id = item.item_id;
+                                        let item_name = item.name.clone();
+                                        let item_status = item.status;
+                                        let header_view = if show_header {
+                                            Some(view! { <div class="inventory-group-header">{group_label}</div> })
+                                        } else {
+                                            None
+                                        };
                                         view! {
-                                            <div
-                                                class="inventory-row"
-                                                class:selected=move || inventory_selected.get().map(|d| d.item_id == item_id).unwrap_or(false)
-                                                on:click=move |_| {
-                                                    trigger_inventory_detail_fetch(
-                                                        item_id,
-                                                        set_inventory_detail_loading,
-                                                        set_inventory_detail_status,
-                                                        set_inventory_selected,
-                                                    );
-                                                }
-                                            >
-                                                <span>{item.item_id}</span>
-                                                <span>{item.name}</span>
-                                                <span>{item.status.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
-                                            </div>
+                                            <>
+                                                {header_view}
+                                                <div
+                                                    class="inventory-row"
+                                                    class:selected=move || inventory_selected.get().map(|d| d.item_id == item_id).unwrap_or(false)
+                                                    on:click=move |_| {
+                                                        trigger_inventory_detail_fetch(
+                                                            item_id,
+                                                            set_inventory_detail_loading,
+                                                            set_inventory_detail_status,
+                                                            set_inventory_selected,
+                                                        );
+                                                    }
+                                                >
+                                                    <span>{item_id}</span>
+                                                    <span>{item_name}</span>
+                                                    <span>{item_status.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())}</span>
+                                                </div>
+                                            </>
                                         }
-                                    }
-                                />
+                                    }).collect::<Vec<_>>()
+                                }}
                             </div>
                             <div class="row" style="margin-top: 16px;">
                                 <button class="button secondary" on:click=move |_| {
@@ -3296,6 +3383,8 @@ pub fn App() -> impl IntoView {
                                         set_inventory_page.set(current - 1);
                                         trigger_inventory_fetch(
                                             inventory_query.get(),
+                                            inventory_food_category.get(),
+                                            inventory_order_by.get(),
                                             current - 1,
                                             inventory_limit,
                                             set_inventory_loading,
@@ -3316,6 +3405,8 @@ pub fn App() -> impl IntoView {
                                         set_inventory_page.set(current + 1);
                                         trigger_inventory_fetch(
                                             inventory_query.get(),
+                                            inventory_food_category.get(),
+                                            inventory_order_by.get(),
                                             current + 1,
                                             inventory_limit,
                                             set_inventory_loading,
@@ -3414,6 +3505,132 @@ pub fn App() -> impl IntoView {
                                                         </div>
                                                     </div>
                                                     <div class="status">{move || edit_item_msg.get()}</div>
+                                                </div>
+                                                <div class="detail-block">
+                                                    <strong>"Categories"</strong>
+                                                    <div class="row" style="margin-top: 10px;">
+                                                        <div class="input">
+                                                            <label>"Food Category"</label>
+                                                            <select
+                                                                prop:value=move || {
+                                                                    let v = edit_item_food_category.get();
+                                                                    if v.is_empty() {
+                                                                        inventory_selected.get()
+                                                                            .map(|d| d.food_category.clone())
+                                                                            .unwrap_or_default()
+                                                                    } else { v }
+                                                                }
+                                                                on:change=move |ev| {
+                                                                    set_edit_item_food_category.set(event_target_value(&ev));
+                                                                }
+                                                                on:focus=move |_| {
+                                                                    if edit_item_food_category.get().is_empty() {
+                                                                        if let Some(d) = inventory_selected.get() {
+                                                                            set_edit_item_food_category.set(d.food_category.clone());
+                                                                        }
+                                                                    }
+                                                                }
+                                                            >
+                                                                <option value="">"None"</option>
+                                                                <option value="Produce">"Produce"</option>
+                                                                <option value="Meat">"Meat"</option>
+                                                                <option value="Poultry">"Poultry"</option>
+                                                                <option value="Seafood">"Seafood"</option>
+                                                                <option value="Vegetables">"Vegetables"</option>
+                                                                <option value="Dairy">"Dairy"</option>
+                                                                <option value="Bakery">"Bakery"</option>
+                                                                <option value="Beverages">"Beverages"</option>
+                                                                <option value="Condiments">"Condiments"</option>
+                                                                <option value="Spices/Seasonings">"Spices/Seasonings"</option>
+                                                                <option value="Grains/Pasta">"Grains/Pasta"</option>
+                                                                <option value="Canned Goods">"Canned Goods"</option>
+                                                                <option value="Other">"Other"</option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="input">
+                                                            <label>"Storage Type"</label>
+                                                            <select
+                                                                prop:value=move || {
+                                                                    let v = edit_item_storage_type.get();
+                                                                    if v.is_empty() {
+                                                                        inventory_selected.get()
+                                                                            .map(|d| d.storage_type.clone())
+                                                                            .unwrap_or_default()
+                                                                    } else { v }
+                                                                }
+                                                                on:change=move |ev| {
+                                                                    set_edit_item_storage_type.set(event_target_value(&ev));
+                                                                }
+                                                                on:focus=move |_| {
+                                                                    if edit_item_storage_type.get().is_empty() {
+                                                                        if let Some(d) = inventory_selected.get() {
+                                                                            set_edit_item_storage_type.set(d.storage_type.clone());
+                                                                        }
+                                                                    }
+                                                                }
+                                                            >
+                                                                <option value="">"None"</option>
+                                                                <option value="Walk-in/Cooler">"Walk-in/Cooler"</option>
+                                                                <option value="Frozen">"Frozen"</option>
+                                                                <option value="Dry Goods">"Dry Goods"</option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="input" style="align-self: end; flex: 0 0 auto;">
+                                                            <button
+                                                                class="button tiny"
+                                                                on:click=move |_| {
+                                                                    let iid = detail.item_id;
+                                                                    let fc = edit_item_food_category.get();
+                                                                    let st = edit_item_storage_type.get();
+                                                                    let fc_val = if fc.is_empty() {
+                                                                        inventory_selected.get().map(|d| d.food_category.clone()).unwrap_or_default()
+                                                                    } else { fc };
+                                                                    let st_val = if st.is_empty() {
+                                                                        inventory_selected.get().map(|d| d.storage_type.clone()).unwrap_or_default()
+                                                                    } else { st };
+                                                                    spawn_local(async move {
+                                                                        let args = to_value(&UpdateItemCategoryArgs {
+                                                                            item_id: iid,
+                                                                            food_category: fc_val,
+                                                                            storage_type: st_val,
+                                                                        }).unwrap();
+                                                                        match invoke_cmd::<PatchResponse>("update_item_category", args).await {
+                                                                            Ok(resp) => {
+                                                                                set_edit_item_category_msg.set(resp.message);
+                                                                                // refresh detail
+                                                                                trigger_inventory_detail_fetch(
+                                                                                    iid,
+                                                                                    set_inventory_detail_loading,
+                                                                                    set_inventory_detail_status,
+                                                                                    set_inventory_selected,
+                                                                                );
+                                                                                // refresh list
+                                                                                trigger_inventory_fetch(
+                                                                                    inventory_query.get(),
+                                                                                    inventory_food_category.get(),
+                                                                                    inventory_order_by.get(),
+                                                                                    inventory_page.get(),
+                                                                                    inventory_limit,
+                                                                                    set_inventory_loading,
+                                                                                    set_inventory_status,
+                                                                                    set_inventory_items,
+                                                                                    set_inventory_total,
+                                                                                    set_inventory_filtered,
+                                                                                    set_inventory_loaded,
+                                                                                );
+                                                                                set_edit_item_food_category.set(String::new());
+                                                                                set_edit_item_storage_type.set(String::new());
+                                                                            }
+                                                                            Err(err) => set_edit_item_category_msg.set(format!("Error: {err}")),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            >
+                                                                "Save categories"
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <div class="status">{move || edit_item_category_msg.get()}</div>
                                                 </div>
                                                 <div class="detail-block">
                                                     <strong>"Assign Purchase Unit"</strong>

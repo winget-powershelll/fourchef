@@ -31,6 +31,9 @@ struct InventoryItem {
     item_id: i64,
     name: String,
     status: Option<i64>,
+    food_category: String,
+    storage_type: String,
+    vendor_name: String,
 }
 
 #[derive(Serialize)]
@@ -89,6 +92,8 @@ struct InventoryDetailResponse {
     item_id: i64,
     name: String,
     status: Option<i64>,
+    food_category: String,
+    storage_type: String,
     purch_units: Vec<InventoryDetailUnit>,
     prices: Vec<InventoryDetailPrice>,
     conversions: Vec<InventoryDetailConversion>,
@@ -1090,64 +1095,82 @@ fn archive_file(path: &Path, archive_dir: &Path) -> Result<(), String> {
 fn search_inventory(
     app: tauri::AppHandle,
     query: String,
+    food_category: Option<String>,
+    order_by: Option<String>,
     limit: u32,
     offset: u32,
 ) -> Result<InventoryQueryResponse, String> {
     let conn = open_initialized_db(&app)?;
     let trimmed = query.trim();
     let like = format!("%{}%", trimmed);
+    let fc = food_category.unwrap_or_default();
+    let fc = fc.trim().to_string();
+    let ob = order_by.unwrap_or_default();
+    let ob = ob.trim().to_string();
 
     let total: i64 = conn
         .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
-    let mut items = Vec::new();
-    let filtered = if trimmed.is_empty() {
-        let filtered = total;
-        let mut stmt = conn
-            .prepare("SELECT item_id, name, status FROM items ORDER BY name LIMIT ?1 OFFSET ?2")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map((limit, offset), |row| {
-                Ok(InventoryItem {
-                    item_id: row.get(0)?,
-                    name: row.get(1)?,
-                    status: row.get(2).ok(),
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            items.push(row.map_err(|e| e.to_string())?);
-        }
-        filtered
-    } else {
-        let filtered: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM items WHERE name LIKE ?1 OR CAST(item_id AS TEXT) LIKE ?1",
-                [&like],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
+    // Build dynamic WHERE clause
+    let mut conditions = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT item_id, name, status FROM items WHERE name LIKE ?1 OR CAST(item_id AS TEXT) LIKE ?1 ORDER BY name LIMIT ?2 OFFSET ?3",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map((&like, limit, offset), |row| {
-                Ok(InventoryItem {
-                    item_id: row.get(0)?,
-                    name: row.get(1)?,
-                    status: row.get(2).ok(),
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            items.push(row.map_err(|e| e.to_string())?);
-        }
-        filtered
+    if !trimmed.is_empty() {
+        params.push(rusqlite::types::Value::from(like.clone()));
+        let idx = params.len();
+        conditions.push(format!("(i.name LIKE ?{idx} OR CAST(i.item_id AS TEXT) LIKE ?{idx})"));
+    }
+    if !fc.is_empty() {
+        params.push(rusqlite::types::Value::from(fc));
+        conditions.push(format!("i.food_category = ?{}", params.len()));
+    }
+
+    let where_sql = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
     };
+
+    // Always LEFT JOIN vendors for vendor_name
+    let from_sql = "items i LEFT JOIN inv_prices ip ON i.item_id = ip.item_id AND ip.status = 1 LEFT JOIN vendors v ON ip.vendor_id = v.vendor_id";
+
+    let count_sql = format!("SELECT COUNT(DISTINCT i.item_id) FROM {} {}", from_sql, where_sql);
+    let filtered: i64 = conn
+        .query_row(&count_sql, rusqlite::params_from_iter(params.clone()), |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    let order_clause = match ob.as_str() {
+        "vendor" => "CASE WHEN v.name IS NULL OR v.name = '' OR v.name = '<No Vendor>' THEN 1 ELSE 0 END, v.name COLLATE NOCASE, i.name COLLATE NOCASE",
+        "storage" => "COALESCE(i.storage_type, 'zzz') COLLATE NOCASE, i.name COLLATE NOCASE",
+        _ => "i.name COLLATE NOCASE",
+    };
+
+    let mut items = Vec::new();
+    let mut query_params = params;
+    query_params.push(rusqlite::types::Value::from(limit as i64));
+    query_params.push(rusqlite::types::Value::from(offset as i64));
+
+    let select_sql = format!(
+        "SELECT DISTINCT i.item_id, i.name, i.status, COALESCE(i.food_category, ''), COALESCE(i.storage_type, ''), COALESCE(v.name, '') FROM {} {} ORDER BY {} LIMIT ? OFFSET ?",
+        from_sql, where_sql, order_clause
+    );
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(query_params), |row| {
+            Ok(InventoryItem {
+                item_id: row.get(0)?,
+                name: row.get(1)?,
+                status: row.get(2).ok(),
+                food_category: row.get(3).unwrap_or_default(),
+                storage_type: row.get(4).unwrap_or_default(),
+                vendor_name: row.get(5).unwrap_or_default(),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        items.push(row.map_err(|e| e.to_string())?);
+    }
 
     Ok(InventoryQueryResponse {
         items,
@@ -1163,11 +1186,11 @@ fn get_inventory_detail(
 ) -> Result<InventoryDetailResponse, String> {
     let conn = open_initialized_db(&app)?;
 
-    let (name, status): (String, Option<i64>) = conn
+    let (name, status, food_category, storage_type): (String, Option<i64>, String, String) = conn
         .query_row(
-            "SELECT name, status FROM items WHERE item_id = ?1",
+            "SELECT name, status, COALESCE(food_category, ''), COALESCE(storage_type, '') FROM items WHERE item_id = ?1",
             [item_id],
-            |row| Ok((row.get(0)?, row.get(1).ok())),
+            |row| Ok((row.get(0)?, row.get(1).ok(), row.get(2).unwrap_or_default(), row.get(3).unwrap_or_default())),
         )
         .map_err(|e| e.to_string())?;
 
@@ -1306,6 +1329,8 @@ fn get_inventory_detail(
         item_id,
         name,
         status,
+        food_category,
+        storage_type,
         purch_units,
         prices,
         conversions,
@@ -3491,14 +3516,39 @@ fn fmt_money(v: f64) -> String {
 fn export_inventory_pdf(
     app: tauri::AppHandle,
     output_path: String,
+    group_by: Option<String>,
 ) -> Result<PatchResponse, String> {
     let conn = open_initialized_db(&app)?;
+    let group_by = group_by.unwrap_or_default();
+
+    let use_vendor_join = group_by == "vendor";
+    let order_clause = match group_by.as_str() {
+        "food_category" => "COALESCE(i.food_category, '') COLLATE NOCASE, i.name COLLATE NOCASE",
+        "storage" => "COALESCE(i.storage_type, '') COLLATE NOCASE, i.name COLLATE NOCASE",
+        "vendor" => "COALESCE(v.name, 'zzz') COLLATE NOCASE, i.name COLLATE NOCASE",
+        _ => "i.name COLLATE NOCASE",
+    };
+
+    let from_sql = if use_vendor_join {
+        "items i LEFT JOIN inv_prices ip ON i.item_id = ip.item_id AND ip.status = 1 LEFT JOIN vendors v ON ip.vendor_id = v.vendor_id"
+    } else {
+        "items i"
+    };
+
+    let select_cols = if use_vendor_join {
+        "DISTINCT i.item_id, i.name, COALESCE(i.status, 0), COALESCE(i.food_category, ''), COALESCE(i.storage_type, ''), COALESCE(v.name, '')"
+    } else {
+        "i.item_id, i.name, COALESCE(i.status, 0), COALESCE(i.food_category, ''), COALESCE(i.storage_type, ''), ''"
+    };
 
     let mut stmt = conn
-        .prepare("SELECT item_id, name, COALESCE(status, 0) FROM items ORDER BY name COLLATE NOCASE")
+        .prepare(&format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            select_cols, from_sql, order_clause
+        ))
         .map_err(|e| e.to_string())?;
-    let items: Vec<(i64, String, i64)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+    let items: Vec<(i64, String, i64, String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3).unwrap_or_default(), row.get(4).unwrap_or_default(), row.get(5).unwrap_or_default())))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -3516,13 +3566,20 @@ fn export_inventory_pdf(
 
     // Title (shifted down to leave room for logo)
     let mut y = 270.0f32;
-    current_layer.use_text("4chef — Inventory Report", 16.0, Mm(margin_left), Mm(y), &font_bold);
+    let title = match group_by.as_str() {
+        "food_category" => "4chef — Inventory Report (by Food Category)",
+        "storage" => "4chef — Inventory Report (by Storage Type)",
+        "vendor" => "4chef — Inventory Report (by Vendor)",
+        _ => "4chef — Inventory Report",
+    };
+    current_layer.use_text(title, 16.0, Mm(margin_left), Mm(y), &font_bold);
     y -= 10.0;
 
     // Column headers
     current_layer.use_text("ID", 9.0, Mm(margin_left), Mm(y), &font_bold);
     current_layer.use_text("Name", 9.0, Mm(margin_left + 20.0), Mm(y), &font_bold);
-    current_layer.use_text("Status", 9.0, Mm(margin_left + 150.0), Mm(y), &font_bold);
+    current_layer.use_text("Category", 9.0, Mm(margin_left + 110.0), Mm(y), &font_bold);
+    current_layer.use_text("Storage", 9.0, Mm(margin_left + 145.0), Mm(y), &font_bold);
     y -= 3.0;
 
     // Draw a line
@@ -3536,16 +3593,51 @@ fn export_inventory_pdf(
     });
     y -= line_height;
 
-    for (item_id, name, status) in &items {
+    let mut last_group = String::new();
+    let is_grouped = group_by == "food_category" || group_by == "storage" || group_by == "vendor";
+
+    for (item_id, name, _status, food_cat, storage_t, vendor_name) in &items {
+        let current_group = match group_by.as_str() {
+            "food_category" => if food_cat.is_empty() { "Uncategorized".to_string() } else { food_cat.clone() },
+            "storage" => if storage_t.is_empty() { "Uncategorized".to_string() } else { storage_t.clone() },
+            "vendor" => if vendor_name.is_empty() { "No Vendor".to_string() } else { vendor_name.clone() },
+            _ => String::new(),
+        };
+
+        // Section header for grouped views
+        if is_grouped && current_group != last_group {
+            if y < 25.0 {
+                let (new_page, new_layer) = doc.add_page(Mm(210.0), Mm(297.0), "Layer 1");
+                current_layer = doc.get_page(new_page).get_layer(new_layer);
+                y = 285.0;
+            }
+            y -= 3.0;
+            current_layer.use_text(&current_group, 11.0, Mm(margin_left), Mm(y), &font_bold);
+            y -= 2.0;
+            let sep_pts = vec![
+                (printpdf::Point::new(Mm(margin_left), Mm(y)), false),
+                (printpdf::Point::new(Mm(195.0), Mm(y)), false),
+            ];
+            current_layer.add_line(printpdf::Line {
+                points: sep_pts,
+                is_closed: false,
+            });
+            y -= line_height;
+            last_group = current_group;
+        }
+
         if y < 15.0 {
             let (new_page, new_layer) = doc.add_page(Mm(210.0), Mm(297.0), "Layer 1");
             current_layer = doc.get_page(new_page).get_layer(new_layer);
             y = 285.0;
         }
         current_layer.use_text(&item_id.to_string(), 8.0, Mm(margin_left), Mm(y), &font);
-        let display_name = if name.len() > 60 { &name[..60] } else { name.as_str() };
+        let display_name = if name.len() > 45 { &name[..45] } else { name.as_str() };
         current_layer.use_text(display_name, 8.0, Mm(margin_left + 20.0), Mm(y), &font);
-        current_layer.use_text(&status.to_string(), 8.0, Mm(margin_left + 150.0), Mm(y), &font);
+        let fc_display = if food_cat.is_empty() { "-" } else { food_cat.as_str() };
+        current_layer.use_text(fc_display, 7.0, Mm(margin_left + 110.0), Mm(y), &font);
+        let st_display = if storage_t.is_empty() { "-" } else { storage_t.as_str() };
+        current_layer.use_text(st_display, 7.0, Mm(margin_left + 145.0), Mm(y), &font);
         y -= line_height;
     }
 
@@ -3666,15 +3758,41 @@ fn export_recipe_pdf(
 fn export_inventory_docx(
     app: tauri::AppHandle,
     output_path: String,
+    group_by: Option<String>,
 ) -> Result<PatchResponse, String> {
     use docx_rs::*;
 
     let conn = open_initialized_db(&app)?;
+    let group_by = group_by.unwrap_or_default();
+
+    let use_vendor_join = group_by == "vendor";
+    let order_clause = match group_by.as_str() {
+        "food_category" => "COALESCE(i.food_category, '') COLLATE NOCASE, i.name COLLATE NOCASE",
+        "storage" => "COALESCE(i.storage_type, '') COLLATE NOCASE, i.name COLLATE NOCASE",
+        "vendor" => "COALESCE(v.name, 'zzz') COLLATE NOCASE, i.name COLLATE NOCASE",
+        _ => "i.name COLLATE NOCASE",
+    };
+
+    let from_sql = if use_vendor_join {
+        "items i LEFT JOIN inv_prices ip ON i.item_id = ip.item_id AND ip.status = 1 LEFT JOIN vendors v ON ip.vendor_id = v.vendor_id"
+    } else {
+        "items i"
+    };
+
+    let select_cols = if use_vendor_join {
+        "DISTINCT i.item_id, i.name, COALESCE(i.status, 0), COALESCE(i.food_category, ''), COALESCE(i.storage_type, ''), COALESCE(v.name, '')"
+    } else {
+        "i.item_id, i.name, COALESCE(i.status, 0), COALESCE(i.food_category, ''), COALESCE(i.storage_type, ''), ''"
+    };
+
     let mut stmt = conn
-        .prepare("SELECT item_id, name, COALESCE(status, 0) FROM items ORDER BY name COLLATE NOCASE")
+        .prepare(&format!(
+            "SELECT {} FROM {} ORDER BY {}",
+            select_cols, from_sql, order_clause
+        ))
         .map_err(|e| e.to_string())?;
-    let items: Vec<(i64, String, i64)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+    let items: Vec<(i64, String, i64, String, String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3).unwrap_or_default(), row.get(4).unwrap_or_default(), row.get(5).unwrap_or_default())))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -3690,24 +3808,55 @@ fn export_inventory_docx(
     }
 
     // Title
+    let title = match group_by.as_str() {
+        "food_category" => "4chef — Inventory Report (by Food Category)",
+        "storage" => "4chef — Inventory Report (by Storage Type)",
+        "vendor" => "4chef — Inventory Report (by Vendor)",
+        _ => "4chef — Inventory Report",
+    };
     docx = docx.add_paragraph(
         Paragraph::new()
-            .add_run(Run::new().add_text("4chef — Inventory Report").bold().size(32)),
+            .add_run(Run::new().add_text(title).bold().size(32)),
     );
     docx = docx.add_paragraph(Paragraph::new()); // spacer
+
+    let is_grouped = group_by == "food_category" || group_by == "storage" || group_by == "vendor";
+    let mut last_group = String::new();
 
     // Build table
     let header_row = TableRow::new(vec![
         TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("ID").bold())),
         TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("Name").bold())),
-        TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("Status").bold())),
+        TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("Category").bold())),
+        TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("Storage").bold())),
     ]);
     let mut rows = vec![header_row];
-    for (item_id, name, status) in &items {
+    for (item_id, name, _status, food_cat, storage_t, vendor_name) in &items {
+        let current_group = match group_by.as_str() {
+            "food_category" => if food_cat.is_empty() { "Uncategorized".to_string() } else { food_cat.clone() },
+            "storage" => if storage_t.is_empty() { "Uncategorized".to_string() } else { storage_t.clone() },
+            "vendor" => if vendor_name.is_empty() { "No Vendor".to_string() } else { vendor_name.clone() },
+            _ => String::new(),
+        };
+
+        if is_grouped && current_group != last_group {
+            // Section header row spanning all columns
+            rows.push(TableRow::new(vec![
+                TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(&current_group).bold().size(22))),
+                TableCell::new().add_paragraph(Paragraph::new()),
+                TableCell::new().add_paragraph(Paragraph::new()),
+                TableCell::new().add_paragraph(Paragraph::new()),
+            ]));
+            last_group = current_group;
+        }
+
+        let fc_display = if food_cat.is_empty() { "-".to_string() } else { food_cat.clone() };
+        let st_display = if storage_t.is_empty() { "-".to_string() } else { storage_t.clone() };
         rows.push(TableRow::new(vec![
             TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(item_id.to_string()))),
             TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(name))),
-            TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(status.to_string()))),
+            TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(&fc_display))),
+            TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text(&st_display))),
         ]));
     }
     docx = docx.add_table(Table::new(rows));
@@ -4612,6 +4761,32 @@ fn remove_logo(app: tauri::AppHandle) -> Result<PatchResponse, String> {
     })
 }
 
+#[tauri::command]
+fn update_item_category(
+    app: tauri::AppHandle,
+    item_id: i64,
+    food_category: String,
+    storage_type: String,
+) -> Result<PatchResponse, String> {
+    let conn = open_initialized_db(&app)?;
+    let fc: Option<String> = if food_category.trim().is_empty() { None } else { Some(food_category.trim().to_string()) };
+    let st: Option<String> = if storage_type.trim().is_empty() { None } else { Some(storage_type.trim().to_string()) };
+
+    let updated = conn
+        .execute(
+            "UPDATE items SET food_category = ?2, storage_type = ?3 WHERE item_id = ?1",
+            (item_id, &fc, &st),
+        )
+        .map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err(format!("Item {} not found", item_id));
+    }
+    Ok(PatchResponse {
+        ok: true,
+        message: "Categories updated".to_string(),
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -4669,7 +4844,8 @@ pub fn run() {
             upload_logo,
             remove_logo,
             export_fda_pdf,
-            global_search
+            global_search,
+            update_item_category
         ])
         .setup(|app| {
             let path = db_path(&app.handle())?;

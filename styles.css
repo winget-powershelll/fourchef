@@ -409,7 +409,7 @@ select {
 .inventory-header,
 .inventory-row {
   display: grid;
-  grid-template-columns: 120px 1fr 120px;
+  grid-template-columns: 80px 1fr 80px;
   gap: 12px;
   padding: 10px 14px;
   align-items: center;
@@ -433,6 +433,18 @@ select {
 
 .inventory-row span:nth-child(2) {
   font-weight: 500;
+}
+
+.inventory-group-header {
+  padding: 8px 14px 4px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  border-top: 2px solid var(--border);
+  margin-top: 4px;
+  background: var(--panel-2);
 }
 
 .inventory-grid {

@@ -299,6 +299,32 @@ pub fn init_db(conn: &Connection) -> Result<(), String> {
             }
         },
     )
+    .and_then(
+        |_| match conn.execute("ALTER TABLE items ADD COLUMN food_category TEXT", []) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("duplicate column name") {
+                    Ok(())
+                } else {
+                    Err(msg)
+                }
+            }
+        },
+    )
+    .and_then(
+        |_| match conn.execute("ALTER TABLE items ADD COLUMN storage_type TEXT", []) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("duplicate column name") {
+                    Ok(())
+                } else {
+                    Err(msg)
+                }
+            }
+        },
+    )
     .and_then(|_| {
         conn.execute_batch(
             r#"
